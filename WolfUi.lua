@@ -4109,7 +4109,9 @@ local function buildBlock(self, opts, isBlock)
     for _, child in ipairs(card:GetChildren()) do
         if child:IsA("UIStroke") then child:Destroy() end
     end
-    card.ClipsDescendants = true
+    -- The box clips its own rows; clipping the card too would cut off the box's
+    -- border stroke (drawn outside its bounds) on the left, right and bottom edges.
+    card.ClipsDescendants = false
     local header = transparent(card, 0, 0, w, headerH, collapsible and "TextButton" or "Frame")
     header.Name = "Header"
     local textX = 2
@@ -4430,35 +4432,46 @@ local function attachColorPicker(tab, parent, x, y, size, opts)
     local alphaValue = opts.Alpha ~= nil and math.clamp(Runtime.Number(opts.Alpha, 1), 0, 1) or 1
     local useAlpha = opts.UseAlpha ~= false
 
+    -- Anchor swatch on the row: a small rounded square, not a dot.
     local anchor = transparent(parent, x, y, size, size, "TextButton")
     anchor.ZIndex = 3
-    local dot = rect(anchor, 0, 0, size, size, color, math.floor(size / 2), nil)
+    local dot = rect(anchor, 0, 0, size, size, color, 4, nil)
     dot.ZIndex = 3
-    new("UIStroke", dot, {Color = palette[5], Thickness = 1, Transparency = 0.35})
+    new("UIStroke", dot, {Color = palette[6], Thickness = 1, Transparency = 0,
+        ApplyStrokeMode = Enum.ApplyStrokeMode.Border})
 
-    local PW = 200
-    local INNER = PW - 20
-    local SV_H = 110
-    local BAR_H = 8
-    local SV_TOP = 10
-    local HUE_TOP = SV_TOP + SV_H + 10
-    local ALPHA_TOP = HUE_TOP + BAR_H + 8
-    local ROW_TOP = (useAlpha and (ALPHA_TOP + BAR_H) or (HUE_TOP + BAR_H)) + 12
+    -- Popup metrics: 12px frame, SV plane, pill sliders, hex row, preset grid.
+    local PW = 220
+    local MARGIN = 12
+    local INNER = PW - MARGIN * 2
+    local SV_H = 120
+    local BAR_H = 10
+    local THUMB = 14
+    local SV_TOP = MARGIN
+    local HUE_TOP = SV_TOP + SV_H + 14
+    local ALPHA_TOP = HUE_TOP + BAR_H + 10
+    local ROW_H = 24
+    local ROW_TOP = (useAlpha and (ALPHA_TOP + BAR_H) or (HUE_TOP + BAR_H)) + 14
 
     local presets = {}
     for _, swatch in ipairs(type(opts.Presets) == "table" and opts.Presets or DEFAULT_PRESETS) do
         if typeof(swatch) == "Color3" then presets[#presets + 1] = swatch end
     end
-    local presetsPerRow = math.max(1, math.floor((PW - 118) / 15))
-    local presetRows = math.max(1, math.ceil(#presets / presetsPerRow))
-    local POP_H = ROW_TOP + 20 + (presetRows - 1) * 15 + 10
+    local SWATCH, SWATCH_GAP = 16, 8
+    local presetsPerRow = math.max(1, math.floor((INNER + SWATCH_GAP) / (SWATCH + SWATCH_GAP)))
+    local presetRows = math.ceil(#presets / presetsPerRow)
+    local PRESET_TOP = ROW_TOP + ROW_H + 14
+    local POP_H = ROW_TOP + ROW_H + MARGIN
+    if presetRows > 0 then
+        POP_H = PRESET_TOP + presetRows * SWATCH + (presetRows - 1) * SWATCH_GAP + MARGIN
+    end
 
     local pop = createPopup(window, anchor, PW, POP_H, false, tab.ParentPopup)
     local host = pop.Object
 
     local hue, saturation, value = color:ToHSV()
 
-    local sv = rect(host, 10, SV_TOP, INNER, SV_H, pureWhite, 4, "TextButton")
+    local sv = rect(host, MARGIN, SV_TOP, INNER, SV_H, pureWhite, 4, "TextButton")
     local svGradient = new("UIGradient", sv, {Color = ColorSequence.new(pureWhite, Color3.fromHSV(hue, 1, 1))})
     local shade = rect(sv, 0, 0, INNER, SV_H, black, 4)
     new("UIGradient", shade, {
@@ -4468,52 +4481,66 @@ local function attachColorPicker(tab, parent, x, y, size, opts)
             NumberSequenceKeypoint.new(1, 0),
         }),
     })
-    local svDot = rect(sv, 0, 0, 10, 10, color, 5)
+    new("UIStroke", sv, {Color = palette[5], Thickness = 1, ApplyStrokeMode = Enum.ApplyStrokeMode.Border})
+    -- Hollow ring cursor so the sampled colour stays visible underneath.
+    local svDot = rect(sv, 0, 0, 12, 12, pureWhite, 6)
+    svDot.BackgroundTransparency = 1
     svDot.ZIndex = 3
     new("UIStroke", svDot, {Color = pureWhite, Thickness = 2})
 
-    local hueBar = rect(host, 10, HUE_TOP, INNER, BAR_H, pureWhite, 4, "TextButton")
+    local function pillThumb(bar)
+        local thumb = rect(bar, 0, (BAR_H - THUMB) / 2, THUMB, THUMB, pureWhite, THUMB / 2)
+        thumb.BackgroundTransparency = 1
+        thumb.ZIndex = 3
+        new("UIStroke", thumb, {Color = pureWhite, Thickness = 2})
+        return thumb
+    end
+
+    local hueBar = rect(host, MARGIN, HUE_TOP, INNER, BAR_H, pureWhite, BAR_H / 2, "TextButton")
     local stops = {}
     for i = 0, 6 do
         stops[#stops + 1] = ColorSequenceKeypoint.new(i / 6, Color3.fromHSV(i / 6, 1, 1))
     end
     new("UIGradient", hueBar, {Color = ColorSequence.new(stops)})
-    local hueThumb = rect(hueBar, 0, -3, 6, BAR_H + 6, pureWhite, 3)
-    hueThumb.ZIndex = 3
-    new("UIStroke", hueThumb, {Color = palette[1], Thickness = 1})
+    local hueThumb = pillThumb(hueBar)
 
     local alphaBar, alphaThumb
     if useAlpha then
-        alphaBar = rect(host, 10, ALPHA_TOP, INNER, BAR_H, color, 4, "TextButton")
+        -- Neutral track underneath so the transparent end of the gradient reads.
+        local alphaTrack = paint(rect(host, MARGIN, ALPHA_TOP, INNER, BAR_H, palette[5], BAR_H / 2), 5)
+        alphaBar = rect(alphaTrack, 0, 0, INNER, BAR_H, color, BAR_H / 2, "TextButton")
+        alphaBar.ZIndex = 2
         new("UIGradient", alphaBar, {
             Transparency = NumberSequence.new({
                 NumberSequenceKeypoint.new(0, 1),
                 NumberSequenceKeypoint.new(1, 0),
             }),
         })
-        alphaThumb = rect(alphaBar, 0, -3, 6, BAR_H + 6, pureWhite, 3)
-        alphaThumb.ZIndex = 3
-        new("UIStroke", alphaThumb, {Color = palette[1], Thickness = 1})
+        alphaThumb = pillThumb(alphaBar)
     end
 
-    local preview = rect(host, 10, ROW_TOP, 22, 20, color, 3)
-    new("UIStroke", preview, {Color = palette[5], Thickness = 1, Transparency = 0.35})
+    local preview = rect(host, MARGIN, ROW_TOP, ROW_H, ROW_H, color, 4)
+    new("UIStroke", preview, {Color = palette[5], Thickness = 1, ApplyStrokeMode = Enum.ApplyStrokeMode.Border})
 
     local hexBox = new("TextBox", host, {
-        Position = UDim2.fromOffset(38, ROW_TOP),
-        Size = UDim2.fromOffset(72, 20),
+        Position = UDim2.fromOffset(MARGIN + ROW_H + 8, ROW_TOP),
+        Size = UDim2.fromOffset(INNER - ROW_H - 8, ROW_H),
         BackgroundColor3 = palette[4],
         BorderSizePixel = 0,
         Text = "#" .. toHex(color),
         PlaceholderText = "#RRGGBB",
+        PlaceholderColor3 = palette[3],
         Font = UI_FONT,
         TextSize = 11 + FONT_SIZE_BIAS,
         TextColor3 = white,
-        TextXAlignment = Enum.TextXAlignment.Center,
+        TextXAlignment = Enum.TextXAlignment.Left,
         ClearTextOnFocus = false,
         ZIndex = 2,
     })
-    new("UICorner", hexBox, {CornerRadius = UDim.new(0, 3)})
+    new("UICorner", hexBox, {CornerRadius = UDim.new(0, 4)})
+    new("UIPadding", hexBox, {PaddingLeft = UDim.new(0, 8), PaddingRight = UDim.new(0, 8)})
+    local hexStroke = new("UIStroke", hexBox, {Color = palette[5], Thickness = 1,
+        ApplyStrokeMode = Enum.ApplyStrokeMode.Border})
 
     local api = {Flag = flag, Anchor = anchor, Popup = pop, Object = anchor}
     function api:SetVisible(visible)
@@ -4557,10 +4584,10 @@ local function attachColorPicker(tab, parent, x, y, size, opts)
     for index, swatch in ipairs(presets) do
         local row = math.floor((index - 1) / presetsPerRow)
         local column = (index - 1) % presetsPerRow
-        local button = rect(host, 118 + column * 15, ROW_TOP + 4 + row * 15,
-            12, 12, swatch, 3, "TextButton")
+        local button = rect(host, MARGIN + column * (SWATCH + SWATCH_GAP), PRESET_TOP + row * (SWATCH + SWATCH_GAP),
+            SWATCH, SWATCH, swatch, 4, "TextButton")
         button.ZIndex = 2
-        new("UIStroke", button, {Color = palette[5], Thickness = 1, Transparency = 0.5})
+        new("UIStroke", button, {Color = palette[5], Thickness = 1, ApplyStrokeMode = Enum.ApplyStrokeMode.Border})
         connect(button.Activated, function()
             hue, saturation, value = swatch:ToHSV()
             push()
@@ -4602,16 +4629,18 @@ local function attachColorPicker(tab, parent, x, y, size, opts)
     local hueX, alphaX = INNER * hue, INNER * alphaValue
     local lastHue, lastHexColor = nil, nil
     local hexText = "#" .. toHex(color)
+    local thumbY = roundPixel((BAR_H - THUMB) / 2)
+    local half = THUMB / 2
 
     step(function(dt, k)
-        svX = approach(svX, math.clamp(INNER * saturation, 5, INNER - 5), k)
-        svY = approach(svY, math.clamp(SV_H * (1 - value), 5, SV_H - 5), k)
-        hueX = approach(hueX, math.clamp(INNER * hue, 0, INNER - 6), k)
-        svDot.Position = UDim2.fromOffset(roundPixel(svX - 5), roundPixel(svY - 5))
-        hueThumb.Position = UDim2.fromOffset(roundPixel(hueX), -3)
+        svX = approach(svX, math.clamp(INNER * saturation, 6, INNER - 6), k)
+        svY = approach(svY, math.clamp(SV_H * (1 - value), 6, SV_H - 6), k)
+        hueX = approach(hueX, math.clamp(INNER * hue, half - 2, INNER - half + 2), k)
+        svDot.Position = UDim2.fromOffset(roundPixel(svX - 6), roundPixel(svY - 6))
+        hueThumb.Position = UDim2.fromOffset(roundPixel(hueX - half), thumbY)
         if useAlpha then
-            alphaX = approach(alphaX, math.clamp(INNER * alphaValue, 0, INNER - 6), k)
-            alphaThumb.Position = UDim2.fromOffset(roundPixel(alphaX), -3)
+            alphaX = approach(alphaX, math.clamp(INNER * alphaValue, half - 2, INNER - half + 2), k)
+            alphaThumb.Position = UDim2.fromOffset(roundPixel(alphaX - half), thumbY)
         end
         if hue ~= lastHue then
             svGradient.Color = ColorSequence.new(pureWhite, Color3.fromHSV(hue, 1, 1))
@@ -4620,10 +4649,11 @@ local function attachColorPicker(tab, parent, x, y, size, opts)
         local current = Color3.fromHSV(hue, saturation, value)
         dot.BackgroundColor3 = current
         dot.BackgroundTransparency = useAlpha and (1 - alphaValue) or 0
-        svDot.BackgroundColor3 = current
         preview.BackgroundColor3 = current
+        preview.BackgroundTransparency = useAlpha and (1 - alphaValue) or 0
         hexBox.BackgroundColor3 = palette[4]
         hexBox.TextColor3 = white
+        hexStroke.Color = editing and palette[6] or palette[5]
         if alphaBar then alphaBar.BackgroundColor3 = current end
         if not editing then
             if current ~= lastHexColor then
@@ -4761,12 +4791,15 @@ function Tab:AddToggle(opts)
     local value = opts.Default and true or false
     local api = baseApi(self, card, flag)
 
-    local box = paint(rect(card, w - 42, 13.5, 32, 16, palette[4], 8), 4)
-    local fill = rect(box, 0, 0, 32, 16, accent, 8)
-    fill.BackgroundTransparency = 1
-    local knob = rect(box, 2, 2, 12, 12, palette[3], 6)
+    -- Checkbox: 16px rounded square, filled with the accent when checked.
+    local CHECK = 16
+    local box = paint(rect(card, w - 10 - CHECK, (43 - CHECK) / 2, CHECK, CHECK, palette[4], 4), 4)
+    local boxStroke = new("UIStroke", box, {Color = palette[5], Thickness = 1,
+        ApplyStrokeMode = Enum.ApplyStrokeMode.Border})
+    local mark = iconLabel(box, {"check"}, 2, 2, CHECK - 4, pureWhite, "v")
+    mark:Alpha(0)
 
-    local edge = w - 42
+    local edge = w - 10 - CHECK
     local function claim(width)
         edge = edge - 10 - width
         return edge
@@ -4776,7 +4809,7 @@ function Tab:AddToggle(opts)
     local accessories, colorPickers = {}, {}
     local title, description
     local function layoutAccessories()
-        local right = w - 42
+        local right = w - 10 - CHECK
         for _, item in ipairs(accessories) do
             local object = item.Object
             if object.Visible then
@@ -4877,11 +4910,15 @@ function Tab:AddToggle(opts)
         a = approach(a, value and 1 or 0, k)
         hoverAlpha = approach(hoverAlpha, hover and 1 or 0, k)
         card.BackgroundColor3 = palette[2]:Lerp(palette[4], hoverAlpha * 0.6)
-        box.BackgroundColor3 = palette[4]:Lerp(palette[6], hoverAlpha * 0.6)
-        fill.BackgroundColor3 = accent
-        fill.BackgroundTransparency = 1 - a * state.AccentAlpha
-        knob.Position = UDim2.fromOffset(roundPixel(2 + 16 * easeOutQuint(a)), 2)
-        knob.BackgroundColor3 = palette[3]:Lerp(Runtime.Contrast(accent), a)
+        box.BackgroundColor3 = palette[4]:Lerp(palette[6], hoverAlpha * 0.6):Lerp(accent, a)
+        box.BackgroundTransparency = a * (1 - state.AccentAlpha)
+        boxStroke.Color = palette[5]:Lerp(palette[6], hoverAlpha):Lerp(accent, a)
+        local grow = easeOutQuint(a)
+        local markSize = roundPixel((CHECK - 4) * (0.5 + 0.5 * grow))
+        mark.Object.Size = UDim2.fromOffset(markSize, markSize)
+        mark.Object.Position = UDim2.fromOffset(roundPixel((CHECK - markSize) / 2), roundPixel((CHECK - markSize) / 2))
+        mark:Color(Runtime.Contrast(accent))
+        mark:Alpha(grow)
         tint = tint:Lerp(value and white or palette[3]:Lerp(white, 0.6 + hoverAlpha * 0.4), k)
         title:Color(tint)
     end, card)
