@@ -850,6 +850,12 @@ local themes = {
     {{0, 0, 0}, {10, 10, 10}, {120, 120, 120}, {20, 20, 20}, {27, 27, 27}, {46, 46, 46}, {240, 240, 240}},
 }
 local THEME_NAMES = {"Midnight", "Graphite", "Ocean", "Rose", "Forest", "Black"}
+-- Semantic colours shared by notifications, badges and dialogs. `info` falls back to the accent.
+local STATUS_COLORS = {
+    success = Color3.fromRGB(110, 220, 140),
+    warning = Color3.fromRGB(240, 200, 90),
+    error = Color3.fromRGB(240, 100, 100),
+}
 local THEME_ACCENTS = {
     Color3.fromRGB(237, 237, 240), Color3.fromRGB(226, 226, 226), Color3.fromRGB(78, 160, 255),
     Color3.fromRGB(238, 112, 160), Color3.fromRGB(82, 198, 140), Color3.fromRGB(236, 236, 236),
@@ -919,12 +925,15 @@ local INTERNAL_FLAGS = {
 local Library = {
     Version = "11.0.0",
     Capabilities = table.freeze({Layout = 3, Groups = 1, Blocks = 1, Themes = 1, NotificationCenter = 1, CardNotifications = 1, ConditionalColors = 1, ConfigRestore = 2, ESPPreview = 1}),
-    Design = table.freeze({CardRadius = 6, PopupRadius = 6, ControlRadius = 5, RowRadius = 4,
+    -- Radii: WindowRadius for the shell, CardRadius/PopupRadius for surfaces,
+    -- ControlRadius for buttons, fields, swatches and checkboxes, RowRadius for list rows.
+    Design = table.freeze({WindowRadius = 8, CardRadius = 6, PopupRadius = 6, ControlRadius = 4, RowRadius = 4,
         CardTransparency = 0, StrokeTransparency = 0, RowTransparency = 1, RowStrokeTransparency = 1,
         RowHoverTransparency = 0.975, DividerInset = 0, BlockColumns = 2, BlockIcons = false,
         HoverStrokeTransparency = 0, EnterDuration = 0.34, EnterStagger = 0.03, EnterRise = 6,
         Gap = 10, Padding = 10, BlockPadding = BLOCK_PAD, BlockGap = BLOCK_GAP}),
     NotificationOptions = {Width = 250, MaxVisible = 5, Position = "Right", Gap = 8, PauseOnHover = true},
+    StatusColors = STATUS_COLORS,
     Flags = {},
     Elements = {},
     NoSaveFlags = {},
@@ -1110,12 +1119,27 @@ function Library:SetConfigAliases(aliases)
     end
 end
 
+local function listenerHandle(list, callback)
+    assert(type(callback) == "function", "WolfUi: listener must be a function")
+    list[#list + 1] = callback
+    local handle = {Connected = true}
+    function handle:Disconnect()
+        if not self.Connected then return end
+        self.Connected = false
+        for index = #list, 1, -1 do
+            if list[index] == callback then table.remove(list, index) break end
+        end
+    end
+    handle.Destroy = handle.Disconnect
+    return handle
+end
+
 function Library:OnChange(callback)
-    changeListeners[#changeListeners + 1] = callback
+    return listenerHandle(changeListeners, callback)
 end
 
 function Library:OnUnload(callback)
-    unloadListeners[#unloadListeners + 1] = callback
+    return listenerHandle(unloadListeners, callback)
 end
 
 function Library:SetFlag(flag, value)
@@ -1297,9 +1321,18 @@ local function createPopup(window, anchor, w, h, animateHeight, parentPopup)
     }
     window.Popups[#window.Popups + 1] = data
     data.Maid = Maid.new(Runtime.GetOwner() or Library.Maid)
+    -- True when this popup is in the open chain, regardless of anchor state.
+    function data:IsOpen()
+        local current = window.Opened
+        while current do
+            if current == self then return true end
+            current = current.Parent
+        end
+        return false
+    end
     function data:Destroy()
         if self.Destroyed then return end
-        if self:IsActive() then window.Opened = self.Parent end
+        if self:IsOpen() then window.Opened = self.Parent end
         self.Destroyed = true
         for index, popup in ipairs(window.Popups) do
             if popup == self then table.remove(window.Popups, index) break end
@@ -1324,7 +1357,7 @@ local function createPopup(window, anchor, w, h, animateHeight, parentPopup)
         if window.Wake then window:Wake() end
     end
     function data:Close()
-        if self:IsActive() then window.Opened = self.Parent end
+        if self:IsOpen() then window.Opened = self.Parent end
         if window.Wake then window:Wake() end
     end
     function data:Toggle(anchorOverride)
@@ -1760,7 +1793,7 @@ function Library:CreateWindow(opts)
     window.TabChanged = new("BindableEvent", events, {Name = "TabChanged"})
     window.ButtonPressed = new("BindableEvent", events, {Name = "ButtonPressed"})
 
-    local frame = paint(rect(gui, 0, 0, WINDOW_W, WINDOW_H, palette[1], 8, "Frame"), 1)
+    local frame = paint(rect(gui, 0, 0, WINDOW_W, WINDOW_H, palette[1], Library.Design.WindowRadius, "Frame"), 1)
     frame.Name = "Window"
     frame.ZIndex = 2
     frame.Active = true
@@ -2113,7 +2146,8 @@ function Library:CreateWindow(opts)
     scrollThumb.Name = "ScrollThumb"
     scrollThumb.ZIndex = 3
     scrollTrack.BackgroundTransparency = 1
-    scrollThumb.BackgroundTransparency = 1
+    scrollThumb.BackgroundTransparency = 0
+    new("UICorner", scrollThumb, {CornerRadius = UDim.new(0.5, 0)})
     window.ScrollTrack = scrollTrack
     window.ScrollThumb = scrollThumb
 
@@ -2664,11 +2698,12 @@ function Library:CreateWindow(opts)
         if window.Wake then window:Wake() end
     end
 
-    local tooltip = rect(gui, 0, 0, 10, 20, palette[1], 3)
+    local tooltip = paint(rect(gui, 0, 0, 10, 20, palette[2], Library.Design.RowRadius), 2)
     tooltip.Name = "Tooltip"
     tooltip.Visible = false
     tooltip.ZIndex = 60
-    new("UIStroke", tooltip, {Color = palette[5], Thickness = 1, Transparency = 0.4})
+    new("UIStroke", tooltip, {Color = palette[5], Thickness = 1, Transparency = 0,
+        ApplyStrokeMode = Enum.ApplyStrokeMode.Border})
     local tooltipText = text(tooltip, "", 6, 4, 10, 12, 11, white, nil, {Wrap = true})
     local tooltipHeight = 20
 
@@ -3026,7 +3061,7 @@ function Library:CreateWindow(opts)
                 tooltip.Size = UDim2.fromOffset(roundPixel(tooltipWidth), roundPixel(tooltipHeight))
             end
             tooltip.Visible = true
-            tooltip.BackgroundColor3 = palette[1]
+            tooltip.BackgroundColor3 = palette[2]
             local anchor = window.TooltipObject
             local origin = anchor.AbsolutePosition
             local anchorSize = anchor.AbsoluteSize
@@ -3650,21 +3685,35 @@ end
 
 local function baseApi(tab, card, flag)
     local api = {Object = card, Flag = flag, Tab = tab}
+    local function unregister()
+        if flag and Library.Elements[flag] == api then Library.Elements[flag] = nil end
+        for index, element in ipairs(tab.Elements) do
+            if element == api then table.remove(tab.Elements, index) break end
+        end
+    end
     function api:SetVisible(value) card.Visible = value and true or false end
-    function api:Destroy() card:Destroy() end
+    function api:GetVisible() return card.Visible end
+    function api:Destroy()
+        if self.Destroyed then return end
+        self.Destroyed = true
+        unregister()
+        card:Destroy()
+    end
     if flag then
         Library.Elements[flag] = api
     end
     tab.Elements[#tab.Elements + 1] = api
     if Runtime.GetOwner() then
-        Runtime.GetOwner():Add(function()
-            if flag and Library.Elements[flag] == api then Library.Elements[flag] = nil end
-            for index, element in ipairs(tab.Elements) do
-                if element == api then table.remove(tab.Elements, index) break end
-            end
-        end)
+        Runtime.GetOwner():Add(unregister)
     end
     return api
+end
+
+-- Every Tab:Add* accepts either an options table or a bare name string.
+local function named(opts)
+    if type(opts) == "table" then return opts end
+    if opts == nil then return {} end
+    return {Name = tostring(opts)}
 end
 
 local function bindTitle(api, title, opts)
@@ -4271,7 +4320,7 @@ function Tab:AddSpacer(opts)
 end
 
 function Tab:AddStat(opts)
-    opts = opts or {}
+    opts = named(opts)
     local w = self:_width(opts.Width)
     local card = self:_card(w, 78, opts.Name or "Stat")
     local title = muted(card, opts.Name or "Value", 10, 9, w - 20, 14, 11)
@@ -4317,16 +4366,26 @@ function Tab:AddSection(nameOrOpts)
     self:_newline()
     local total = self:_pageWidth()
     local caption = string.upper(tostring(opts.Name or "Section"))
-    local api
+    local label, object
     if self.IsGroup then
-        local row = self:_card(total, 30, "Section")
-        api = muted(row, caption, 10, 10, total - 20, 16, 10, nil, {Bold = true})
+        object = self:_card(total, 30, "Section")
+        label = muted(object, caption, 10, 7, total - 20, 16, 10, nil, {Bold = true})
     else
         local x, y = self:_place(total, 16)
-        api = muted(self.Page, caption, x, y, total, 16, 10, nil, {Bold = true})
+        label = muted(self.Page, caption, x, y, total, 16, 10, nil, {Bold = true})
+        object = label.Object
     end
     self:_newline()
     self:_grow()
+    -- Object is the whole row so SetVisible/Destroy affect layout, not just the caption.
+    local api = {Object = object, Label = label.Object}
+    function api:SetText(value) label:SetText(string.upper(tostring(value or ""))) end
+    api.SetName = api.SetText
+    function api:GetText() return label:GetText() end
+    function api:Color(value) label:Color(value) end
+    function api:Alpha(value) label:Alpha(value) end
+    function api:SetVisible(value) object.Visible = value and true or false end
+    function api:Destroy() object:Destroy() end
     return api
 end
 
@@ -4372,7 +4431,7 @@ function Tab:AddLabel(opts)
 end
 
 function Tab:AddParagraph(opts)
-    opts = opts or {}
+    opts = named(opts)
     local w = self:_width(opts.Width)
     local body = tostring(opts.Text or "")
     local bounds = TextService:GetTextSize(body, 11 + FONT_SIZE_BIAS, UI_FONT, Vector2.new(w - 20, 10000))
@@ -4427,7 +4486,7 @@ local DEFAULT_PRESETS = {
 local function attachColorPicker(tab, parent, x, y, size, opts)
     opts = opts or {}
     local window = tab.Window
-    local flag = opts.Flag or ((opts.Name or "Color") .. "." .. tostring(tab.Name))
+    local flag = opts.Flag or (tostring(tab.Name) .. "." .. (opts.Name or "Color"))
     local color = typeof(opts.Default) == "Color3" and opts.Default or state.Accent
     local alphaValue = opts.Alpha ~= nil and math.clamp(Runtime.Number(opts.Alpha, 1), 0, 1) or 1
     local useAlpha = opts.UseAlpha ~= false
@@ -4435,7 +4494,7 @@ local function attachColorPicker(tab, parent, x, y, size, opts)
     -- Anchor swatch on the row: a small rounded square, not a dot.
     local anchor = transparent(parent, x, y, size, size, "TextButton")
     anchor.ZIndex = 3
-    local dot = rect(anchor, 0, 0, size, size, color, 4, nil)
+    local dot = rect(anchor, 0, 0, size, size, color, Library.Design.ControlRadius, nil)
     dot.ZIndex = 3
     new("UIStroke", dot, {Color = palette[6], Thickness = 1, Transparency = 0,
         ApplyStrokeMode = Enum.ApplyStrokeMode.Border})
@@ -4678,7 +4737,7 @@ local function attachColorPicker(tab, parent, x, y, size, opts)
 end
 
 function Tab:AddColorPicker(opts)
-    opts = opts or {}
+    opts = named(opts)
     local name = opts.Name or "Color"
     local w = self:_width(opts.Width)
     local card = self:_card(w, 43, name)
@@ -4702,7 +4761,7 @@ local function attachKeybind(tab, parent, x, y, w, h, opts)
     local key = opts.Default
     if type(key) == "string" then key = keyFromName(key) end
 
-    local button = paint(rect(parent, x, y, w, h, palette[4], 4, "TextButton"), 4)
+    local button = paint(rect(parent, x, y, w, h, palette[4], Library.Design.ControlRadius, "TextButton"), 4)
     new("UIStroke", button, {Color = palette[5], Thickness = 1, ApplyStrokeMode = Enum.ApplyStrokeMode.Border})
     button.ZIndex = 3
     local caption = text(button, keyName(key), 0, 0, w, h, 10, palette[3], "center")
@@ -4764,13 +4823,13 @@ local function attachKeybind(tab, parent, x, y, w, h, opts)
 end
 
 function Tab:AddKeybind(opts)
-    opts = opts or {}
+    opts = named(opts)
     local name = opts.Name or "Keybind"
     local w = self:_width(opts.Width)
     local card = self:_card(w, 43, name)
-    local title = text(card, name, 10, opts.Description and 7 or 14.5, w - 66, 14, 12, white)
+    local title = text(card, name, 10, opts.Description and 7 or 14.5, w - 100, 14, 12, white)
     if opts.Description then
-        muted(card, opts.Description, 10, 22, w - 76, 14, 11)
+        muted(card, opts.Description, 10, 22, w - 100, 14, 11)
     end
     local bind = attachKeybind(self, card, w - 80, 12.5, 70, 18, opts)
     local api = baseApi(self, card, bind.Flag)
@@ -4782,7 +4841,7 @@ function Tab:AddKeybind(opts)
 end
 
 function Tab:AddToggle(opts)
-    opts = opts or {}
+    opts = named(opts)
     local name = opts.Name or "Toggle"
     local flag = opts.Flag or (self.Name .. "." .. name)
     local w = self:_width(opts.Width)
@@ -4793,17 +4852,13 @@ function Tab:AddToggle(opts)
 
     -- Checkbox: 16px rounded square, filled with the accent when checked.
     local CHECK = 16
-    local box = paint(rect(card, w - 10 - CHECK, (43 - CHECK) / 2, CHECK, CHECK, palette[4], 4), 4)
+    local box = paint(rect(card, w - 10 - CHECK, (43 - CHECK) / 2, CHECK, CHECK, palette[4], Library.Design.ControlRadius), 4)
     local boxStroke = new("UIStroke", box, {Color = palette[5], Thickness = 1,
         ApplyStrokeMode = Enum.ApplyStrokeMode.Border})
     local mark = iconLabel(box, {"check"}, 2, 2, CHECK - 4, pureWhite, "v")
     mark:Alpha(0)
 
     local edge = w - 10 - CHECK
-    local function claim(width)
-        edge = edge - 10 - width
-        return edge
-    end
 
     local colorPicker, keybind, settings, mini
     local accessories, colorPickers = {}, {}
@@ -4950,9 +5005,9 @@ local function makeSlider(tab, parent, x, y, w, opts)
 
     local card = surface(parent, x, y, w, 58, tab and tab.IsGroup)
     card.Name = name
-    local title = text(card, name, 10, 10, w - 70, 14, 12, white)
+    local title = text(card, name, 10, 10, w - 95, 14, 12, white)
     if opts.Description then
-        muted(card, opts.Description, 10, 22, w - 20, 14, 11)
+        muted(card, opts.Description, 10, 22, w - 95, 14, 11)
     end
     local valueLabel = text(card, "", w - 75, 10, 65, 14, 11, palette[3], "right")
     themedLabels[valueLabel.Object] = 3
@@ -5038,7 +5093,7 @@ local function makeSlider(tab, parent, x, y, w, opts)
 end
 
 function Tab:AddSlider(opts)
-    opts = opts or {}
+    opts = named(opts)
     local w = self:_width(opts.Width)
     local x, y = self:_place(w, 58)
     local api = makeSlider(self, self.Page, x, y, w, opts)
@@ -5048,7 +5103,7 @@ function Tab:AddSlider(opts)
 end
 
 function Tab:AddDropdown(opts)
-    opts = opts or {}
+    opts = named(opts)
     local name = opts.Name or "Dropdown"
     local flag = opts.Flag or (self.Name .. "." .. name)
     local multiple = opts.Multiple and true or false
@@ -5240,9 +5295,10 @@ function Tab:AddDropdown(opts)
             local firstRow, lastRow = index == 1, index == #options
             entry.Object.Visible = true
             entry.Title:SetText(option)
-            entry.Corner.CornerRadius = UDim.new(0, (firstRow or lastRow) and 5 or 0)
+            local cap = Library.Design.PopupRadius - 1
+            entry.Corner.CornerRadius = UDim.new(0, (firstRow or lastRow) and cap or 0)
             entry.Fill.Visible = firstRow ~= lastRow
-            entry.Fill.Position = UDim2.fromOffset(0, firstRow and 5 or 0)
+            entry.Fill.Position = UDim2.fromOffset(0, firstRow and cap or 0)
         end
     end
 
@@ -5338,7 +5394,7 @@ function Tab:AddDropdown(opts)
 end
 
 function Tab:AddTextBox(opts)
-    opts = opts or {}
+    opts = named(opts)
     local name = opts.Name or "Text field"
     local flag = opts.Flag or (self.Name .. "." .. name)
     local w = self:_width(opts.Width)
@@ -5351,7 +5407,7 @@ function Tab:AddTextBox(opts)
     end
 
     local fieldH = withTitle and 24 or 27
-    local field = paint(rect(card, 10, withTitle and 27 or 7, w - 20, fieldH, palette[4], 4), 4)
+    local field = paint(rect(card, 10, withTitle and 27 or 7, w - 20, fieldH, palette[4], Library.Design.ControlRadius), 4)
     field.Name = "Field"
     local fieldStroke = new("UIStroke", field, {Color = palette[5], Thickness = 1, Transparency = 0,
         ApplyStrokeMode = Enum.ApplyStrokeMode.Border})
@@ -5450,7 +5506,7 @@ function Tab:AddTextBox(opts)
         suppressText = newText
         lastPublished = newText
         box.Text = newText
-        if silent then Library.Flags[flag] = newText else push(true) end
+        push(not silent)
     end
     function api:Focus()
         if not self.Destroyed and Runtime.IsEnabled(card) and isRendered(card) then box:CaptureFocus() end
@@ -5468,7 +5524,7 @@ function Tab:AddTextBox(opts)
 end
 
 function Tab:AddButton(opts)
-    opts = opts or {}
+    opts = named(opts)
     local name = opts.Name or "Button"
     local w = self:_width(opts.Width)
     local compact = opts.Compact and true or false
@@ -5484,7 +5540,8 @@ function Tab:AddButton(opts)
         control = paint(rect(card, 5, 7, controlW, controlH, palette[4], Library.Design.ControlRadius, "TextButton"), 4)
         new("UIStroke", control, {Color = palette[5], Thickness = 1, ApplyStrokeMode = Enum.ApplyStrokeMode.Border})
     elseif compact then
-        control = paint(rect(card, 0, 0, w, 31, palette[4], 4, "TextButton"), 4)
+        control = paint(rect(card, 0, 0, w, 31, palette[4], Library.Design.ControlRadius, "TextButton"), 4)
+        new("UIStroke", control, {Color = palette[5], Thickness = 1, ApplyStrokeMode = Enum.ApplyStrokeMode.Border})
     else
         local reserve = opts.Text ~= nil and math.clamp(#tostring(opts.Text) * 7 + 40, 70, math.floor(w * 0.45) + 10) or 40
         title = text(card, name, 10, opts.Description and 7 or 14.5, w - 10 - reserve, 14, 12, white)
@@ -5618,7 +5675,7 @@ function Tab:AddButton(opts)
 end
 
 function Tab:AddMiniButton(opts)
-    opts = opts or {}
+    opts = named(opts)
     local name = opts.Name or "Quick button"
     local flag = opts.Flag or (self.Name .. "." .. name .. ".Shown")
     local mode = (opts.Mode == "Action" or opts.Mode == "Button") and "Action" or "Toggle"
@@ -5658,7 +5715,7 @@ function Tab:AddMiniButton(opts)
 end
 
 function Tab:AddSettings(opts)
-    opts = opts or {}
+    opts = named(opts)
     local name = opts.Name or "Settings"
     local w = self:_width(opts.Width)
     local card = self:_card(w, 43, name)
@@ -5674,7 +5731,7 @@ function Tab:AddSettings(opts)
 end
 
 function Tab:AddStepper(opts)
-    opts = opts or {}
+    opts = named(opts)
     local name = opts.Name or "Value"
     local flag = opts.Flag or (self.Name .. "." .. name)
     local w = self:_width(opts.Width)
@@ -5695,10 +5752,13 @@ function Tab:AddStepper(opts)
     if opts.Description then
         muted(card, opts.Description, 10, 22, math.max(30, w - 116), 14, 11)
     end
-    local minus = paint(rect(card, w - 100, 11.5, 20, 20, palette[4], 4, "TextButton"), 4)
+    local radius = Library.Design.ControlRadius
+    local minus = paint(rect(card, w - 100, 11.5, 20, 20, palette[4], radius, "TextButton"), 4)
+    new("UIStroke", minus, {Color = palette[5], Thickness = 1, ApplyStrokeMode = Enum.ApplyStrokeMode.Border})
     text(minus, "-", 0, 0, 20, 20, 14, white, "center")
     local valueLabel = text(card, "", w - 76, 11.5, 46, 20, 12, white, "center")
-    local plus = paint(rect(card, w - 30, 11.5, 20, 20, palette[4], 4, "TextButton"), 4)
+    local plus = paint(rect(card, w - 30, 11.5, 20, 20, palette[4], radius, "TextButton"), 4)
+    new("UIStroke", plus, {Color = palette[5], Thickness = 1, ApplyStrokeMode = Enum.ApplyStrokeMode.Border})
     text(plus, "+", 0, 0, 20, 20, 14, white, "center")
 
     local api = baseApi(self, card, flag)
@@ -5734,9 +5794,12 @@ function Tab:AddStepper(opts)
     connect(minus.MouseLeave, function() hoverMinus = false end)
     connect(plus.MouseEnter, function() hoverPlus = true end)
     connect(plus.MouseLeave, function() hoverPlus = false end)
-    step(function()
-        minus.BackgroundColor3 = palette[4]:Lerp(palette[5], hoverMinus and 1 or 0)
-        plus.BackgroundColor3 = palette[4]:Lerp(palette[5], hoverPlus and 1 or 0)
+    local minusGlow, plusGlow = 0, 0
+    step(function(dt, k)
+        minusGlow = approach(minusGlow, hoverMinus and 1 or 0, k)
+        plusGlow = approach(plusGlow, hoverPlus and 1 or 0, k)
+        minus.BackgroundColor3 = palette[4]:Lerp(palette[5], minusGlow)
+        plus.BackgroundColor3 = palette[4]:Lerp(palette[5], plusGlow)
     end, card)
 
     push(false)
@@ -5745,7 +5808,7 @@ function Tab:AddStepper(opts)
 end
 
 function Tab:AddSegmented(opts)
-    opts = opts or {}
+    opts = named(opts)
     local name = opts.Name or "Mode"
     local flag = opts.Flag or (self.Name .. "." .. name)
     local w = self:_width(opts.Width)
@@ -5772,11 +5835,10 @@ function Tab:AddSegmented(opts)
     local track = paint(rect(card, 10, rowY, total, 26, palette[1], Library.Design.ControlRadius), 1)
     new("UIStroke", track, {Color = palette[5], Thickness = 1, ApplyStrokeMode = Enum.ApplyStrokeMode.Border})
     local cellW = (total - 4) / #options
-    local indicator = paint(rect(track, 2, 2, cellW, 22, palette[4], Library.Design.ControlRadius - 1), 4)
+    local indicator = paint(rect(track, 2, 2, cellW, 22, palette[4], math.max(2, Library.Design.ControlRadius - 1)), 4)
     new("UIStroke", indicator, {Color = palette[6], Thickness = 1, ApplyStrokeMode = Enum.ApplyStrokeMode.Border})
     local indicatorX, indicatorVelocity = nil, 0
     local selection = 1
-    local cells = {}
     local api = baseApi(self, card, flag)
     if title then bindTitle(api, title, opts) end
 
@@ -5820,16 +5882,13 @@ function Tab:AddSegmented(opts)
             selection = index
             push(true)
         end)
-        local hover, a, tint = false, 0, palette[3]
+        local hover, tint = false, palette[3]
         connect(cell.MouseEnter, function() hover = true end)
         connect(cell.MouseLeave, function() hover = false end)
         step(function(dt, k)
-            local active = selection == index
-            a = approach(a, active and 1 or 0, k)
-            tint = tint:Lerp(active and white or palette[3]:Lerp(white, hover and 0.5 or 0), k)
+            tint = tint:Lerp(selection == index and white or palette[3]:Lerp(white, hover and 0.5 or 0), k)
             caption:Color(tint)
         end, cell)
-        cells[index] = cell
     end
 
     if opts.Default ~= nil then
@@ -5841,43 +5900,62 @@ function Tab:AddSegmented(opts)
 end
 
 function Tab:AddProgressBar(opts)
-    opts = opts or {}
+    opts = named(opts)
     local name = opts.Name or "Progress"
+    local flag = opts.Flag or (self.Name .. "." .. name)
     local w = self:_width(opts.Width)
-    local card = self:_card(w, 43, name)
+    local hasDescription = opts.Description ~= nil
+    local trackY = hasDescription and 42 or 29
+    local card = self:_card(w, trackY + 14, name)
     local title = text(card, name, 10, 8, w - 70, 14, 12, white)
+    local description = hasDescription and muted(card, opts.Description, 10, 22, w - 70, 14, 11) or nil
     local valueLabel = muted(card, "0%", w - 55, 8, 45, 14, 11, "right")
-    local track = paint(rect(card, 10, 29, w - 20, 4, palette[4], 2), 4)
+    local track = paint(rect(card, 10, trackY, w - 20, 4, palette[4], 2), 4)
     local fillClip = transparent(track, 0, 0, 0, 4)
     fillClip.ClipsDescendants = true
     local fill = rect(fillClip, 0, 0, w - 20, 4, accent, 2)
 
     local value = math.clamp(tonumber(opts.Default) or 0, 0, 1)
     local shown = value
-    local api = baseApi(self, card, opts.Flag)
+    -- Percent caption is automatic until SetText supplies a custom one.
+    local showPercent = opts.ShowPercent ~= false
+    local api = baseApi(self, card, flag)
+
+    local function push(fire)
+        Library.Flags[flag] = value
+        fireChange(flag, value)
+        if fire and opts.Callback then Runtime.Spawn(opts.Callback, value) end
+    end
 
     function api:Get() return value end
-    function api:Set(newValue)
-        value = math.clamp(Runtime.Number(newValue, 0), 0, 1)
-        if opts.Flag then Library.Flags[opts.Flag] = value end
+    function api:Set(newValue, silent)
+        value = math.clamp(Runtime.Number(newValue, value), 0, 1)
+        push(not silent)
     end
     bindTitle(api, title, opts)
-    function api:SetText(v) valueLabel:SetText(tostring(v)) end
+    function api:SetDescription(caption)
+        if description then description:SetText(caption) end
+    end
+    function api:SetText(caption)
+        showPercent = caption == nil
+        if caption ~= nil then valueLabel:SetText(tostring(caption)) end
+    end
 
     step(function(dt, k)
         shown = approach(shown, value, k)
         fillClip.Size = UDim2.fromOffset(roundPixel((w - 20) * shown), 4)
         fill.BackgroundColor3 = accent
         fill.BackgroundTransparency = 1 - state.AccentAlpha
-        if opts.ShowPercent ~= false then
+        if showPercent then
             valueLabel:SetText(tostring(math.floor(shown * 100 + 0.5)) .. "%")
         end
     end, card)
+    push(false)
     return api
 end
 
 function Tab:AddImage(opts)
-    opts = opts or {}
+    opts = named(opts)
     local w = self:_width(opts.Width)
     local height = math.max(20, math.floor(tonumber(opts.Height) or 120))
     local card = self:_card(w, height, opts.Name or "Image")
@@ -5890,34 +5968,38 @@ function Tab:AddImage(opts)
         ScaleType = opts.Fill and Enum.ScaleType.Crop or Enum.ScaleType.Fit,
         ZIndex = 2,
     })
-    new("UICorner", image, {CornerRadius = UDim.new(0, 5)})
+    new("UICorner", image, {CornerRadius = UDim.new(0, Library.Design.CardRadius)})
     local api = baseApi(self, card, nil)
     function api:SetImage(value) image.Image = tostring(value or "") end
+    function api:GetImage() return image.Image end
     return api
 end
 
 function Tab:AddList(opts)
-    opts = opts or {}
+    opts = named(opts)
     local name = opts.Name or "List"
     local flag = opts.Flag or (self.Name .. "." .. name)
     local w = self:_width(opts.Width)
     local listH = math.max(31, math.floor(tonumber(opts.Height) or 93))
     local withInput = opts.Input ~= false
-    local card = self:_card(w, 28 + (withInput and 41 or 0) + listH + 10, name)
+    local FIELD_H, FIELD_GAP = 27, 10
+    local hasDescription = opts.Description ~= nil
+    local headerH = hasDescription and 40 or 28
+    local card = self:_card(w, headerH + (withInput and FIELD_H + FIELD_GAP or 0) + listH + 10, name)
 
-    local title = text(card, name, 10, 10, w - 20, 14, 12, white)
+    local title = text(card, name, 10, hasDescription and 7 or 10, w - 20, 14, 12, white)
+    if hasDescription then muted(card, opts.Description, 10, 22, w - 20, 14, 11) end
 
     local items = {}
     for _, item in ipairs(opts.Items or {}) do items[#items + 1] = tostring(item) end
 
     local api = baseApi(self, card, flag)
     bindTitle(api, title, opts)
-    local rows = {}
     local rowsOwner = Runtime.GetOwner() or Library.Maid
     local rowsMaid
     local ROW_H = 31
 
-    local listY = 28 + (withInput and 41 or 0)
+    local listY = headerH + (withInput and FIELD_H + FIELD_GAP or 0)
     local holder = new("ScrollingFrame", card, {
         BackgroundTransparency = 1,
         BorderSizePixel = 0,
@@ -5943,12 +6025,11 @@ function Tab:AddList(opts)
     local function rebuild()
         if rowsMaid then rowsMaid:Destroy() end
         rowsMaid = Maid.new(rowsOwner)
-        rows = {}
         withOwner(rowsMaid, function()
         empty.Object.Visible = #items == 0
         for index, item in ipairs(items) do
-            local row = paint(rect(holder, 0, (index - 1) * ROW_H, w - 26, ROW_H - 4, palette[4], 3), 4)
-            local caption = text(row, item, 8, 0, w - 60, ROW_H - 4, 11, white)
+            local row = paint(rect(holder, 0, (index - 1) * ROW_H, w - 26, ROW_H - 4, palette[4], Library.Design.RowRadius), 4)
+            text(row, item, 8, 0, w - 60, ROW_H - 4, 11, white)
             local remove = transparent(row, w - 52, 4, 19, 19, "TextButton")
             local icon = iconLabel(remove, {"x", "trash-2"}, 3, 3, 13, palette[3], "x")
             connect(remove.Activated, function()
@@ -5956,26 +6037,30 @@ function Tab:AddList(opts)
                 rebuild()
                 push(true)
             end)
-            local hover = false
+            local hover, glow = false, 0
             connect(remove.MouseEnter, function() hover = true end)
             connect(remove.MouseLeave, function() hover = false end)
             step(function(dt, k)
-                icon:Color(palette[3]:Lerp(white, hover and 1 or 0))
-                caption:Color(white)
+                glow = approach(glow, hover and 1 or 0, k)
+                icon:Color(palette[3]:Lerp(white, glow))
             end, row)
             rowsMaid:Add(row)
-            rows[#rows + 1] = row
         end
         holder.CanvasSize = UDim2.fromOffset(0, #items * ROW_H)
         end)
     end
 
     if withInput then
-        local box = new("TextBox", card, {
-            BackgroundColor3 = palette[4],
+        local ADD_W = 36
+        local field = paint(rect(card, 10, headerH, w - 20 - ADD_W - 8, FIELD_H, palette[4],
+            Library.Design.ControlRadius), 4)
+        local fieldStroke = new("UIStroke", field, {Color = palette[5], Thickness = 1,
+            ApplyStrokeMode = Enum.ApplyStrokeMode.Border})
+        local box = new("TextBox", field, {
+            BackgroundTransparency = 1,
             BorderSizePixel = 0,
-            Position = UDim2.fromOffset(10, 28),
-            Size = UDim2.fromOffset(w - 62, 31),
+            Position = UDim2.fromOffset(10, 0),
+            Size = UDim2.fromOffset(w - 20 - ADD_W - 8 - 20, FIELD_H),
             Text = "",
             PlaceholderText = opts.Placeholder or "Add item",
             PlaceholderColor3 = palette[3],
@@ -5984,17 +6069,23 @@ function Tab:AddList(opts)
             TextSize = 12 + FONT_SIZE_BIAS,
             TextColor3 = white,
             TextXAlignment = Enum.TextXAlignment.Left,
+            TextTruncate = Enum.TextTruncate.AtEnd,
+            ClipsDescendants = true,
             ZIndex = 2,
         })
-        new("UICorner", box, {CornerRadius = UDim.new(0, 3)})
-        new("UIPadding", box, {PaddingLeft = UDim.new(0, 8)})
-        step(function()
-            box.BackgroundColor3 = palette[4]
+        local focused, focusGlow = false, 0
+        connect(box.Focused, function() focused = true end)
+        connect(box.FocusLost, function() focused = false end)
+        step(function(dt, k)
+            focusGlow = approach(focusGlow, focused and 1 or 0, k)
+            fieldStroke.Color = palette[5]:Lerp(accent, focusGlow * state.AccentAlpha)
             box.PlaceholderColor3 = palette[3]
             box.TextColor3 = white
         end, box)
-        local add = paint(rect(card, w - 46, 28, 36, 31, palette[4], 3, "TextButton"), 4)
-        local addIcon = iconLabel(add, {"plus"}, 12, 9, 13, white, "+")
+        local add = paint(rect(card, w - 10 - ADD_W, headerH, ADD_W, FIELD_H, palette[4],
+            Library.Design.ControlRadius, "TextButton"), 4)
+        new("UIStroke", add, {Color = palette[5], Thickness = 1, ApplyStrokeMode = Enum.ApplyStrokeMode.Border})
+        local addIcon = iconLabel(add, {"plus"}, (ADD_W - 13) / 2, (FIELD_H - 13) / 2, 13, white, "+")
         local function commit()
             local value = box.Text
             if value ~= "" then
@@ -6008,11 +6099,12 @@ function Tab:AddList(opts)
         connect(box.FocusLost, function(enter)
             if enter then commit() end
         end)
-        local hover = false
+        local hover, glow = false, 0
         connect(add.MouseEnter, function() hover = true end)
         connect(add.MouseLeave, function() hover = false end)
-        step(function()
-            add.BackgroundColor3 = palette[4]:Lerp(palette[5], hover and 1 or 0)
+        step(function(dt, k)
+            glow = approach(glow, hover and 1 or 0, k)
+            add.BackgroundColor3 = palette[4]:Lerp(palette[5], glow)
             addIcon:Color(white)
         end, add)
     end
@@ -6028,20 +6120,22 @@ function Tab:AddList(opts)
         rebuild()
         push(not silent)
     end
-    function api:Add(value)
+    function api:Add(value, silent)
         items[#items + 1] = tostring(value)
         rebuild()
-        push(true)
+        push(not silent)
+        return true
     end
-    function api:Remove(value)
+    function api:Remove(value, silent)
         for index, item in ipairs(items) do
             if item == tostring(value) then
                 table.remove(items, index)
-                break
+                rebuild()
+                push(not silent)
+                return true
             end
         end
-        rebuild()
-        push(true)
+        return false
     end
     function api:Has(value)
         for _, item in ipairs(items) do
@@ -6049,7 +6143,8 @@ function Tab:AddList(opts)
         end
         return false
     end
-    function api:Clear() self:Set({}) end
+    function api:Count() return #items end
+    function api:Clear(silent) self:Set({}, silent) end
 
     rebuild()
     push(false)
@@ -6059,7 +6154,7 @@ end
 Library.PlayersListRevision = "players-cards-r5"
 
 function Tab:AddPlayerList(opts)
-    opts = opts or {}
+    opts = named(opts)
     local name = opts.Name or "Players"
     local flag = opts.Flag or (self.Name .. "." .. name)
     local w = self:_width(opts.Width or 370)
@@ -6103,6 +6198,7 @@ function Tab:AddPlayerList(opts)
     local filterText = ""
     local title = text(card, name, 10, 9, math.max(40, w - 70), 15, 12, white)
     local countLabel = text(card, "0", w - 50, 9, 40, 15, 10, palette[3], "right")
+    bindTitle(api, title, opts)
 
     local function playerIcon(parent, names, x, y, size, color, fallback)
         local ok, icon = pcall(iconLabel, parent, names, x, y, size, color, fallback)
@@ -6113,15 +6209,30 @@ function Tab:AddPlayerList(opts)
     end
 
     local search = new("TextBox", card, {
-        BackgroundColor3 = palette[4], BackgroundTransparency = 0.08,
+        BackgroundColor3 = palette[4], BackgroundTransparency = 0,
         BorderSizePixel = 0, Position = UDim2.fromOffset(10, 28),
-        Size = UDim2.fromOffset(math.max(80, w - 20), 28),
+        Size = UDim2.fromOffset(math.max(80, w - 20), 27),
         ClearTextOnFocus = false, PlaceholderText = opts.Placeholder or "Find player...",
         PlaceholderColor3 = palette[3], Text = "", TextColor3 = white,
-        Font = UI_FONT, TextSize = 11, TextXAlignment = Enum.TextXAlignment.Left, ZIndex = 3,
+        Font = UI_FONT, TextSize = 12 + FONT_SIZE_BIAS, TextXAlignment = Enum.TextXAlignment.Left,
+        TextTruncate = Enum.TextTruncate.AtEnd, ClipsDescendants = true, ZIndex = 3,
     })
-    new("UICorner", search, {CornerRadius = UDim.new(0, 5)})
-    new("UIPadding", search, {PaddingLeft = UDim.new(0, 9), PaddingRight = UDim.new(0, 8)})
+    themedBackgrounds[search] = 4
+    new("UICorner", search, {CornerRadius = UDim.new(0, Library.Design.ControlRadius)})
+    new("UIPadding", search, {PaddingLeft = UDim.new(0, 10), PaddingRight = UDim.new(0, 10)})
+    local searchStroke = new("UIStroke", search, {Color = palette[5], Thickness = 1,
+        ApplyStrokeMode = Enum.ApplyStrokeMode.Border})
+    do
+        local focused, glow = false, 0
+        connect(search.Focused, function() focused = true end)
+        connect(search.FocusLost, function() focused = false end)
+        step(function(dt, k)
+            glow = approach(glow, focused and 1 or 0, k)
+            searchStroke.Color = palette[5]:Lerp(accent, glow * state.AccentAlpha)
+            search.PlaceholderColor3 = palette[3]
+            search.TextColor3 = white
+        end, search)
+    end
 
     local holder = new("ScrollingFrame", card, {
         Name = "PlayerList",
@@ -6568,11 +6679,11 @@ function Tab:AddPlayerList(opts)
 end
 
 function Tab:AddPlayerDropdown(opts)
-    opts = opts or {}
+    opts = named(opts)
     local function names(excluded)
         local list = {}
         for _, player in ipairs(Players:GetPlayers()) do
-            if player ~= excluded and (opts.IncludeSelf ~= false or player ~= Players.LocalPlayer) then
+            if player ~= excluded and (opts.IncludeSelf == true or player ~= Players.LocalPlayer) then
                 list[#list + 1] = player.Name
             end
         end
@@ -6581,7 +6692,7 @@ function Tab:AddPlayerDropdown(opts)
     end
 
     local api = self:AddDropdown({
-        Name = opts.Name or "Игрок",
+        Name = opts.Name or "Player",
         Description = opts.Description,
         Flag = opts.Flag,
         Options = names(),
@@ -6640,6 +6751,11 @@ local elementMethods = {
     progress = "AddProgressBar",
     image = "AddImage",
     list = "AddList",
+    playerlist = "AddPlayerList",
+    players = "AddPlayerList",
+    notice = "AddNotice",
+    stat = "AddStat",
+    spacer = "AddSpacer",
     configmanager = "AddConfigManager",
     configs = "AddConfigManager",
     cards = "AddCardGrid",
@@ -6713,7 +6829,7 @@ function Library:CreateCheckMark(parent,x,y,size,color)
 end
 
 function Tab:AddCardGrid(opts)
-    opts = opts or {}
+    opts = named(opts)
     local window = self.Window
     local name = opts.Name or "Cards"
     local flag = opts.Flag or (self.Name .. "." .. name)
@@ -7385,7 +7501,30 @@ function Tab:AddCardSelector(opts) return self:AddCardGrid(opts) end
 function Window:AddSearch() return nil end
 function Library:AddSearch() return nil end
 function Library:GetSearch() return nil end
-function Library:AddTheme() return nil end
+-- Registers (or replaces) a theme. `colors` holds the seven palette slots as Color3 or {r, g, b}.
+function Library:AddTheme(name, colors, accentColor)
+    assert(type(name) == "string" and name ~= "", "WolfUi: AddTheme needs a name")
+    assert(type(colors) == "table", "WolfUi: AddTheme needs a table of 7 colours")
+    local theme = {}
+    for slot = 1, 7 do
+        local value = colors[slot]
+        if type(value) == "table" then value = Color3.fromRGB(value[1] or 0, value[2] or 0, value[3] or 0) end
+        assert(typeof(value) == "Color3", "WolfUi: theme slot " .. slot .. " must be a Color3")
+        theme[slot] = value
+    end
+    local index = resolveTheme(name)
+    if not index then
+        index = #themes + 1
+        THEME_NAMES[index] = name
+    end
+    themes[index] = theme
+    THEME_ACCENTS[index] = typeof(accentColor) == "Color3" and accentColor or THEME_ACCENTS[index] or theme[7]
+    local list = {}
+    for i, entry in ipairs(themes) do list[i] = table.freeze(table.clone(entry)) end
+    self.Themes = table.freeze(list)
+    if state.Theme == index then Runtime.ThemeDirty = true end
+    return index
+end
 function Library:SetTheme(value, keepAccent)
     local index = resolveTheme(value) or state.Theme or 1
     state.Theme, self.Theme = index, index
@@ -7396,7 +7535,19 @@ function Library:SetTheme(value, keepAccent)
 end
 function Library:GetTheme() return THEME_NAMES[state.Theme] or THEME_NAMES[1], state.Theme end
 function Library:GetThemes() return table.clone(THEME_NAMES) end
-function Library:SetPaletteColor() return nil end
+-- Overrides one slot of the active theme; the palette eases to it on the next frame.
+function Library:SetPaletteColor(slot, color)
+    slot = math.floor(tonumber(slot) or 0)
+    if slot < 1 or slot > 7 or typeof(color) ~= "Color3" then return false end
+    local theme = themes[state.Theme] or themes[1]
+    theme[slot] = color
+    Runtime.ThemeDirty = true
+    if self.Window and self.Window.Wake then self.Window:Wake(1) end
+    return true
+end
+function Library:GetPaletteColor(slot)
+    return palette[math.floor(tonumber(slot) or 0)]
+end
 
 function Tab:AddElements(items)
     assert(type(items) == "table", "WolfUi: AddElements expects a table")
@@ -7593,7 +7744,7 @@ function Library:NotifyCards(opts)
     local width,height=296,142
     local colors=Library.Palette or palette
     local tweenService=game:GetService("TweenService")
-    local panel=rect(window.Gui,0,0,width,height,colors[2],10,"CanvasGroup")
+    local panel=rect(window.Gui,0,0,width,height,colors[2],Library.Design.PopupRadius,"CanvasGroup")
     panel.Name="CardNotification"
     panel.AnchorPoint=Vector2.new(0,0)
     panel.ZIndex=80
@@ -7603,7 +7754,7 @@ function Library:NotifyCards(opts)
     maid:Add(panel)
     api.Object=panel
     local scale=new("UIScale",panel,{Scale=1})
-    new("UIStroke",panel,{Color=colors[5],Thickness=1,Transparency=0.56})
+    new("UIStroke",panel,{Color=colors[5],Thickness=1,Transparency=Library.Design.StrokeTransparency})
     local function label(parent,caption,x,y,w,h,size,color,bold)
         return new("TextLabel",parent,{BackgroundTransparency=1,BorderSizePixel=0,
             Position=UDim2.fromOffset(x,y),Size=UDim2.fromOffset(w,h),Text=tostring(caption),
@@ -7613,13 +7764,13 @@ function Library:NotifyCards(opts)
     label(panel,opts.Title or "Map vote",10,8,151,16,11,colors[3],true)
     local subtitle=label(panel,opts.Text or "Choose a map",10,25,width-20,13,9,colors[3])
     subtitle.TextTransparency=0.36
-    local control=rect(panel,171,8,82,22,colors[4],6)
+    local control=rect(panel,171,8,82,22,colors[4],Library.Design.ControlRadius)
     control.ZIndex=85;control.BackgroundTransparency=0.16
     local value=label(control,"10",21,0,40,22,11,colors[3],true)
     value.TextXAlignment=Enum.TextXAlignment.Center;value.ZIndex=87
     local countValue=math.clamp(math.floor(tonumber(opts.Value) or 10),1,100)
-    local minus=rect(control,0,0,21,22,colors[4],6,"TextButton")
-    local plus=rect(control,61,0,21,22,colors[4],6,"TextButton")
+    local minus=rect(control,0,0,21,22,colors[4],Library.Design.ControlRadius,"TextButton")
+    local plus=rect(control,61,0,21,22,colors[4],Library.Design.ControlRadius,"TextButton")
     for _,button in ipairs({minus,plus}) do button.ZIndex=88;button.TextColor3=colors[3];button.TextSize=14;button.BackgroundTransparency=1 end
     minus.Text="−";plus.Text="+"
     api.ValueLabel=value
@@ -7632,14 +7783,13 @@ function Library:NotifyCards(opts)
     maid:Connect(minus.Activated,function() api:SetValue(countValue-1) end)
     maid:Connect(plus.Activated,function() api:SetValue(countValue+1) end)
     api:SetValue(countValue,true)
-    local close=rect(panel,width-33,7,23,23,colors[4],6,"TextButton")
+    local close=rect(panel,width-33,7,23,23,colors[4],Library.Design.ControlRadius,"TextButton")
     close.ZIndex=89;close.BackgroundTransparency=1;close.Text="×";close.TextSize=17;close.TextColor3=colors[3]
     local cells={}
     local function applySelected()
         for _,cell in ipairs(cells) do
             local on=cell.Def and tostring(cell.Def.Id)==api.Selected
             cell.Edge.Transparency=on and 0 or 0.4
-            cell.Edge.Color=on and colors[3] or colors[5]
             local tint=Library.Accent or colors[3]
             cell.Edge.Color=on and tint or colors[5]
             cell.CheckFill.BackgroundColor3=tint
@@ -7652,7 +7802,7 @@ function Library:NotifyCards(opts)
     end
     for index=1,3 do
         local x=10+(index-1)*94
-        local group=rect(panel,x,44,88,88,colors[4],7,"CanvasGroup")
+        local group=rect(panel,x,44,88,88,colors[4],Library.Design.CardRadius,"CanvasGroup")
         group.ZIndex=82;group.ClipsDescendants=true;group.BackgroundTransparency=0
         local cellScale=new("UIScale",group,{Scale=1})
         local edge=new("UIStroke",group,{Color=colors[5],Thickness=1,Transparency=0.55})
@@ -7666,11 +7816,11 @@ function Library:NotifyCards(opts)
         title.TextXAlignment=Enum.TextXAlignment.Center;title.ZIndex=85
         local pill=rect(group,10,9,20,17,colors[2],5);pill.BackgroundTransparency=0.1;pill.ZIndex=85
         local count=label(pill,"0",0,0,20,17,9,colors[3],true);count.ZIndex=86;count.TextXAlignment=Enum.TextXAlignment.Center
-        local check=rect(group,64,10,14,14,colors[1],3)
+        local check=rect(group,64,10,14,14,colors[1],Library.Design.ControlRadius)
         check.ZIndex=85;check.BackgroundTransparency=0.15
         local checkStroke=new("UIStroke",check,{Color=colors[5],Thickness=1,Transparency=0.3})
         checkStroke.ApplyStrokeMode=Enum.ApplyStrokeMode.Border
-        local checkFill=rect(check,7,7,0,0,Library.Accent or colors[3],3);checkFill.ZIndex=86
+        local checkFill=rect(check,7,7,0,0,Library.Accent or colors[3],Library.Design.ControlRadius);checkFill.ZIndex=86
         local checkMark=Library:CreateCheckMark(check,1,1,12,Color3.new(0,0,0))
         checkMark.Object.ZIndex=87;checkMark:Alpha(0)
         local button=new("TextButton",group,{Text="",BackgroundTransparency=1,AutoButtonColor=false,
@@ -7794,6 +7944,11 @@ function Library:ClearNotifications(instant)
     end
 end
 
+local NOTIFICATION_ICONS = {
+    info = {"info", "bell"}, success = {"check-circle", "check"},
+    warning = {"alert-triangle", "alert-circle"}, error = {"x-circle", "alert-octagon"},
+}
+
 function Library:Notify(opts)
     opts = type(opts) == "table" and opts or {Text = opts}
     local window = self.Window
@@ -7874,16 +8029,13 @@ function Library:Notify(opts)
         end
         if changes.Text ~= nil or changes.Title ~= nil then self:SetText(changes.Text or body) end
         if self.Destroyed then return self end
+        if changes.Type ~= nil then
+            local kind = string.lower(tostring(changes.Type))
+            self.Type = NOTIFICATION_ICONS[kind] and kind or "info"
+            self.Color = Library.StatusColors[self.Type]
+        end
         if changes.Type ~= nil or changes.Icon ~= nil then
-            local kind = string.lower(tostring(changes.Type or "info"))
-            local definitions = {
-                info = {"info", "bell"}, success = {"check-circle", "check"},
-                warning = {"alert-triangle", "alert-circle"}, error = {"x-circle", "alert-octagon"},
-            }
-            self.Icon:SetIcon(changes.Icon or definitions[kind] or definitions.info)
-            local colors = {success = Color3.fromRGB(110, 220, 140),
-                warning = Color3.fromRGB(240, 200, 90), error = Color3.fromRGB(240, 100, 100)}
-            self.Color = colors[kind]
+            self.Icon:SetIcon(changes.Icon or NOTIFICATION_ICONS[self.Type or "info"])
         end
         if typeof(changes.Color) == "Color3" then self.Color = changes.Color end
         if changes.Sticky ~= nil then self.Sticky = changes.Sticky == true end
@@ -8220,11 +8372,17 @@ function Library:Dialog(opts)
     end
     for index = 1, count do
         local button = paint(rect(card, 20 + (index - 1) * (buttonW + 8), height - 47,
-            buttonW, 31, palette[4], 4, "TextButton"), 4)
+            buttonW, 31, palette[4], Library.Design.ControlRadius, "TextButton"), 4)
+        new("UIStroke", button, {Color = palette[5], Thickness = 1, ApplyStrokeMode = Enum.ApplyStrokeMode.Border})
         text(button, tostring(labels[index]), 0, 0, buttonW, 31, 11, white, "center")
-        maid:Connect(button.MouseEnter, function() button.BackgroundColor3 = palette[5] end)
-        maid:Connect(button.MouseLeave, function() button.BackgroundColor3 = palette[4] end)
+        local hover, glow = false, 0
+        maid:Connect(button.MouseEnter, function() hover = true end)
+        maid:Connect(button.MouseLeave, function() hover = false end)
         maid:Connect(button.Activated, function() choose(index) end)
+        step(function(dt, k)
+            glow = approach(glow, hover and 1 or 0, k)
+            button.BackgroundColor3 = palette[4]:Lerp(palette[5], glow)
+        end, button)
     end
     maid:Connect(UIS.InputBegan, function(input, processed)
         if not processed and input.KeyCode == Enum.KeyCode.Escape and window.Dialog == api then
@@ -9552,6 +9710,11 @@ function Library:Unload()
     Runtime.Unloading = true
     Runtime.Alive = false
     self.Destroyed = true
+    -- Listeners run first so they can still read flags and elements.
+    for _, listener in ipairs(unloadListeners) do
+        pcall(listener)
+    end
+    unloadListeners = {}
     if self.SetAutoSave then self:SetAutoSave(false) end
     local window = self.Window
     if window then
@@ -9622,10 +9785,6 @@ function Library:Unload()
     self.NoSaveFlags = {}
     self.Flags = {}
     for object in pairs(fadeCaches) do fadeCaches[object] = nil end
-    for _, listener in ipairs(unloadListeners) do
-        pcall(listener)
-    end
-    unloadListeners = {}
     changeListeners = {}
     flagWatchers = {}
     if Runtime.ResetConfigs then Runtime.ResetConfigs() end
