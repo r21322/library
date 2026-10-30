@@ -19,15 +19,33 @@ local function rootPart()
     return character and character:FindFirstChild("HumanoidRootPart")
 end
 
+-- Custom themes: register before CreateWindow so they can be the default, or any time
+-- after (the theme picker refreshes itself). Colours are written by role; anything you
+-- leave out is inherited from "Midnight" (or the theme named in Extends).
+Library:AddTheme({
+    Name = "Dusk",
+    Colors = {
+        Window = "#120F16", Surface = "#1A1620", Control = "#241E2C",
+        Stroke = "#2F2838", StrongStroke = "#443A50", Muted = "#8F8599", Text = "#F1ECF6",
+    },
+    Accent = Color3.fromRGB(203, 150, 255),
+    -- Background = "rbxassetid://0000000000", -- optional: any image id, shown behind the window
+})
+
 local Window = Library:CreateWindow({
     Name = "WolfUi",
     Icon = {"paw-print", "dog"},
-    Theme = "Midnight",
+    Theme = "Midnight",        -- default theme; "Dusk" would pick the custom one above
+    -- Background = {Image = "rbxassetid://0000000000", Transparency = 0.7, ScaleType = "Crop"},
     ToggleKey = "RightShift",
     MenuSettings = true,       -- rail button with scale + theme picker
     Configs = true,            -- required for AddConfigManager
     Folder = "WolfUiDemo",
 })
+
+-- Motion is tunable in one place: Speed drives every eased property, Spring the sliding
+-- indicators, Rise the window open offset. Enabled = false turns animations off entirely.
+Library:SetMotion({Speed = 16, Spring = 26})
 
 ------------------------------------------------------------------------
 -- Home: stats, notices, text, progress
@@ -304,7 +322,7 @@ local Settings = Window:CreateTab({
 -- No AddBlock here: loose elements go into the "Appearance" block (BlockName)
 Settings:AddSegmented({
     Name = "Theme",
-    Options = {"Midnight", "Ocean", "Rose", "Forest"},
+    Options = {"Midnight", "Ocean", "Dusk", "Forest"},
     Default = "Midnight",
     Callback = function(name) Library:SetTheme(name) end,
 })
@@ -313,6 +331,16 @@ Settings:AddDropdown({
     Options = Library:GetThemes(),
     Default = (Library:GetTheme()),
     Callback = function(name) Library:SetTheme(name) end,
+})
+Settings:AddToggle({
+    Name = "Accent wash",
+    Description = "Soft accent gradient behind the window",
+    Default = true,
+    Callback = function(on)
+        local current = Library:GetBackground() or {}
+        current.Gradient = on
+        Library:SetBackground(current)
+    end,
 })
 Settings:AddColorPicker({
     Name = "Accent color",
@@ -356,6 +384,23 @@ Settings:AddConfigManager({Name = "Configs"})
 -- Groups are collapsible blocks that do not capture later loose elements
 local Credits = Settings:AddGroup({Name = "Credits", Icon = {"heart"}, Collapsed = true})
 Credits:AddParagraph({Name = "WolfUi", Text = "Version " .. tostring(Library.Version)})
+
+------------------------------------------------------------------------
+-- Custom elements: register once, then use Tab:AddKeyValue or {Type = "keyvalue"}
+------------------------------------------------------------------------
+Library:RegisterElement("KeyValue", function(tab, opts)
+    local H = Library.Helpers
+    local w = tab:_width(opts.Width)
+    local card = tab:_card(w, 43, opts.Name or "KeyValue")
+    H.muted(card, opts.Name or "Key", 10, 14.5, w - 110, 14, 11)
+    local value = H.text(card, tostring(opts.Value or ""), w - 110, 14.5, 100, 14, 12, nil, "right")
+    local api = H.baseApi(tab, card, opts.Flag)
+    function api:Set(v) value:SetText(v) end
+    function api:Get() return value:GetText() end
+    return api
+end, {"kv"})
+
+Credits:AddKeyValue({Name = "Build", Value = "2026.10"})
 
 ------------------------------------------------------------------------
 -- Live updates

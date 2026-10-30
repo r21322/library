@@ -850,6 +850,13 @@ local themes = {
     {{0, 0, 0}, {10, 10, 10}, {120, 120, 120}, {20, 20, 20}, {27, 27, 27}, {46, 46, 46}, {240, 240, 240}},
 }
 local THEME_NAMES = {"Midnight", "Graphite", "Ocean", "Rose", "Forest", "Black"}
+-- Per-theme window backdrop (see Library:SetBackground). nil = flat window colour.
+local THEME_BACKGROUNDS = {}
+-- Named aliases for the seven palette slots, so themes can be written by role.
+local PALETTE_SLOTS = {
+    Window = 1, Background = 1, Surface = 2, Card = 2, Muted = 3, MutedText = 3,
+    Control = 4, Fill = 4, Stroke = 5, Border = 5, StrongStroke = 6, Outline = 6, Text = 7, Foreground = 7,
+}
 -- Semantic colours shared by notifications, badges and dialogs. `info` falls back to the accent.
 local STATUS_COLORS = {
     success = Color3.fromRGB(110, 220, 140),
@@ -934,6 +941,9 @@ local Library = {
         Gap = 10, Padding = 10, BlockPadding = BLOCK_PAD, BlockGap = BLOCK_GAP}),
     NotificationOptions = {Width = 250, MaxVisible = 5, Position = "Right", Gap = 8, PauseOnHover = true},
     StatusColors = STATUS_COLORS,
+    -- Motion: Speed drives every eased property (higher = snappier); Spring is the
+    -- stiffness for sliding indicators. Tune with Library:SetMotion.
+    Motion = {Speed = 16, Spring = 26, Rise = 8},
     Flags = {},
     Elements = {},
     NoSaveFlags = {},
@@ -989,6 +999,8 @@ local state = {
     Scale = 75,
     Accent = accent,
     AccentAlpha = 1,
+    Background = nil,
+    BackgroundPinned = false,
 }
 
 local flagWatchers = {}
@@ -1052,6 +1064,18 @@ end
 
 function Library:GetFadeAnimations()
     return self.FadeAnimations ~= false, self.FadeDuration
+end
+
+function Library:SetMotion(opts)
+    if type(opts) ~= "table" then return self.Motion end
+    if opts.Speed ~= nil then self.Motion.Speed = math.clamp(tonumber(opts.Speed) or 16, 4, 60) end
+    if opts.Spring ~= nil then self.Motion.Spring = math.clamp(tonumber(opts.Spring) or 26, 6, 80) end
+    if opts.Rise ~= nil then self.Motion.Rise = math.clamp(tonumber(opts.Rise) or 8, 0, 40) end
+    if opts.FadeDuration ~= nil then self:SetFadeDuration(opts.FadeDuration) end
+    if opts.TabDuration ~= nil and self.SetTabDuration then self:SetTabDuration(opts.TabDuration) end
+    if opts.Enabled ~= nil then self.FadeAnimations = opts.Enabled ~= false end
+    if self.Window and self.Window.Wake then self.Window:Wake() end
+    return self.Motion
 end
 
 function Library:SetFadeDuration(duration)
@@ -1438,7 +1462,7 @@ function Runtime.StartRenderer(window, frame, scale, popupLayer, blurSize, inval
         local runUi = active or window.UpdateAccumulator >= 1 / idleRate
         local uiDt = active and dt or math.min(window.UpdateAccumulator, 0.1)
         if runUi then window.UpdateAccumulator = 0 end
-        local k = motionFactor(18, dt)
+        local k = motionFactor(Library.Motion.Speed, dt)
         if window.GlassBlur then
             local camera = workspace.CurrentCamera
             if window.GlassBlur.Parent ~= camera then window.GlassBlur.Parent = camera end
@@ -1523,7 +1547,7 @@ function Runtime.StartRenderer(window, frame, scale, popupLayer, blurSize, inval
             renderCache = window.RenderCache
             table.clear(renderCache)
         end
-        if runUi then runUpdates(Runtime.Overlay, uiDt, motionFactor(18, uiDt), renderCache) end
+        if runUi then runUpdates(Runtime.Overlay, uiDt, motionFactor(Library.Motion.Speed, uiDt), renderCache) end
         if not Runtime.Alive or window.Destroyed then return end
 
         Runtime.StepNotifications(window, elapsed, dt)
@@ -1536,7 +1560,7 @@ function Runtime.StartRenderer(window, frame, scale, popupLayer, blurSize, inval
 
         if runUi then
             window.Animating = false
-            local uiK = motionFactor(18, uiDt)
+            local uiK = motionFactor(Library.Motion.Speed, uiDt)
             table.clear(renderCache)
             runUpdates(Runtime.Updates, uiDt, uiK, renderCache)
             if not Runtime.Alive or window.Destroyed then return end
@@ -1634,8 +1658,8 @@ function Runtime.StartRenderer(window, frame, scale, popupLayer, blurSize, inval
             end
         end
         local hiddenAmount = 1 - math.clamp(window.Alpha, 0, 1)
-        local eased = hiddenAmount * hiddenAmount
-        local shrink = 1 - 0.04 * eased
+        local eased = hiddenAmount * hiddenAmount * hiddenAmount
+        local shrink = 1 - 0.025 * eased
         local openScale = window.ScaleCurrent * shrink
         if math.abs(scale.Scale - openScale) > 0.00005 then
             scale.Scale = openScale
@@ -1643,7 +1667,7 @@ function Runtime.StartRenderer(window, frame, scale, popupLayer, blurSize, inval
         end
         local inset = Vector2.new(WINDOW_W, WINDOW_H) * (window.ScaleCurrent - openScale) / 2
         local animatedPosition = UDim2.fromOffset(roundPixel(window.Position.X + inset.X),
-            roundPixel(window.Position.Y + inset.Y + eased * 10 * window.ScaleCurrent))
+            roundPixel(window.Position.Y + inset.Y + eased * Library.Motion.Rise * window.ScaleCurrent))
         frame.Position = animatedPosition
         popupLayer.Position = animatedPosition
         if mainTransitioning then
@@ -1721,6 +1745,8 @@ function Library:CreateWindow(opts)
     white = palette[7] or pureWhite
     Library.Theme, Library.Scale = state.Theme, state.Scale
     Library.Accent, Library.AccentAlpha = state.Accent, state.AccentAlpha
+    state.BackgroundPinned = false
+    state.Background = opts.Background ~= nil and opts.Background or THEME_BACKGROUNDS[state.Theme]
 
     local windowIcon = opts.Icon or {"dog", "paw-print", "moon"}
     local menuSettings = opts.MenuSettings
@@ -1799,6 +1825,57 @@ function Library:CreateWindow(opts)
     frame.Active = true
     frame.ClipsDescendants = true
     window.Frame = frame
+
+    -- Backdrop: optional image plus a soft accent wash, both clipped to the window radius.
+    local backdrop = transparent(frame, 0, 0, WINDOW_W, WINDOW_H)
+    backdrop.Name = "Backdrop"
+    backdrop.ZIndex = 0
+    local backdropImage = new("ImageLabel", backdrop, {
+        Name = "Image", BackgroundTransparency = 1, BorderSizePixel = 0,
+        Size = UDim2.fromScale(1, 1), Image = "", ImageTransparency = 1, Visible = false,
+        ScaleType = Enum.ScaleType.Crop, ZIndex = 0,
+    })
+    new("UICorner", backdropImage, {CornerRadius = UDim.new(0, Library.Design.WindowRadius)})
+    local backdropWash = rect(backdrop, 0, 0, WINDOW_W, WINDOW_H, pureWhite, Library.Design.WindowRadius)
+    backdropWash.Name = "Wash"
+    backdropWash.ZIndex = 0
+    backdropWash.BackgroundTransparency = 1
+    new("UIGradient", backdropWash, {
+        Rotation = 35,
+        Transparency = NumberSequence.new({
+            NumberSequenceKeypoint.new(0, 0.9),
+            NumberSequenceKeypoint.new(0.55, 1),
+            NumberSequenceKeypoint.new(1, 1),
+        }),
+    })
+    window.Backdrop = backdrop
+    local backdropSpec = {}
+    function window.ApplyBackground(spec)
+        spec = type(spec) == "table" and spec or {}
+        local image = spec.Image ~= nil and tostring(spec.Image) or ""
+        if image ~= "" and not string.find(image, "://", 1, true) then image = "rbxassetid://" .. image end
+        local scaleType = string.lower(tostring(spec.ScaleType or "crop"))
+        backdropImage.Image = image
+        backdropImage.Visible = image ~= ""
+        backdropImage.ImageColor3 = typeof(spec.Tint) == "Color3" and spec.Tint or pureWhite
+        backdropImage.ScaleType = scaleType == "tile" and Enum.ScaleType.Tile
+            or scaleType == "fit" and Enum.ScaleType.Fit
+            or scaleType == "stretch" and Enum.ScaleType.Stretch
+            or Enum.ScaleType.Crop
+        local tile = math.max(16, math.floor(tonumber(spec.TileSize) or 256))
+        backdropImage.TileSize = UDim2.fromOffset(tile, tile)
+        backdropSpec.Transparency = math.clamp(tonumber(spec.Transparency) or 0.6, 0, 1)
+        backdropSpec.Gradient = spec.Gradient == nil and true or spec.Gradient
+        window.MainFadeDirty = true
+        window:Wake()
+    end
+    step(function()
+        local gradient = backdropSpec.Gradient
+        backdropWash.BackgroundTransparency = gradient and 0 or 1
+        backdropWash.BackgroundColor3 = typeof(gradient) == "Color3" and gradient or accent
+        if backdropImage.Visible then backdropImage.ImageTransparency = backdropSpec.Transparency or 0.6 end
+    end, backdrop)
+    window.ApplyBackground(state.Background)
     frame.BackgroundTransparency = 0
     new("UIStroke", frame, {
         Color = palette[5], Thickness = 1, Transparency = 0,
@@ -1970,17 +2047,17 @@ function Library:CreateWindow(opts)
     local brandName = tostring(opts.Title or opts.Name or "WolfUi")
     local logoHit = transparent(sidebar, 0, 0, SIDEBAR_W - 1, BRAND_H, "TextButton")
     logoHit.Name = "Brand"
-    local logoChip = paint(rect(logoHit, 16, (BRAND_H - 22) / 2, 22, 22, palette[7], 5), 7)
-    local logoIcon = iconLabel(logoChip, windowIcon, 4, 4, 14, palette[1], string.sub(brandName, 1, 1))
+    local logoChip = paint(rect(logoHit, 16, (BRAND_H - 24) / 2, 24, 24, palette[4], Library.Design.ControlRadius), 4)
+    new("UIStroke", logoChip, {Color = palette[5], Thickness = 1, ApplyStrokeMode = Enum.ApplyStrokeMode.Border})
+    local logoIcon = iconLabel(logoChip, windowIcon, 5, 5, 14, white, string.sub(brandName, 1, 1))
     local hasSubtitle = opts.Subtitle ~= nil
-    local brandTitle = text(logoHit, brandName, 46, hasSubtitle and BRAND_H / 2 - 14 or 0, SIDEBAR_W - 60,
-        hasSubtitle and 15 or BRAND_H, 13, white, nil, {Bold = true})
-    local brandCaption = muted(logoHit, hasSubtitle and tostring(opts.Subtitle) or "", 46, BRAND_H / 2 + 1,
-        SIDEBAR_W - 60, 13, 10)
+    local brandTitle = text(logoHit, brandName, 48, hasSubtitle and BRAND_H / 2 - 14 or 0, SIDEBAR_W - 62,
+        hasSubtitle and 15 or BRAND_H, 13, white, nil, {Font = UI_FONT_MEDIUM})
+    local brandCaption = muted(logoHit, hasSubtitle and tostring(opts.Subtitle) or "", 48, BRAND_H / 2 + 1,
+        SIDEBAR_W - 62, 13, 10)
     brandCaption.Object.Visible = hasSubtitle
     step(function()
-        logoChip.BackgroundColor3 = palette[7]
-        logoIcon:Color(palette[1])
+        logoIcon:Color(accent)
     end, logoHit)
 
     window.LogoIcon = logoIcon
@@ -2064,6 +2141,9 @@ function Library:CreateWindow(opts)
     navHighlight.Name = "ActiveHighlight"
     navHighlight.ZIndex = 0
     navHighlight.BackgroundTransparency = 1
+    local navIndicator = rect(tabHolder, 0, 0, 2, 14, accent, 1)
+    navIndicator.Name = "ActiveIndicator"
+    navIndicator.ZIndex = 2
     local navY, navVelocity, navAlpha = nil, 0, 0
     step(function(dt, k)
         local tab = window.Current
@@ -2071,15 +2151,19 @@ function Library:CreateWindow(opts)
         if not navY or Library.FadeAnimations == false then
             navY, navVelocity = target, 0
         else
-            navY, navVelocity = spring(navY, navVelocity, target, 30, dt)
+            navY, navVelocity = spring(navY, navVelocity, target, Library.Motion.Spring, dt)
             if navY ~= target then window.Animating = true end
         end
         navAlpha = approach(navAlpha, tab and 1 or 0, k)
         navHighlight.Position = UDim2.fromOffset(8, roundPixel(navY))
         navHighlight.BackgroundColor3 = palette[4]
         navHighlight.BackgroundTransparency = 1 - navAlpha
+        navIndicator.Position = UDim2.fromOffset(0, roundPixel(navY + (TAB_SLOT - 2 - 14) / 2))
+        navIndicator.BackgroundColor3 = accent
+        navIndicator.BackgroundTransparency = 1 - navAlpha * state.AccentAlpha
     end, navHighlight)
     window.NavHighlight = navHighlight
+    window.NavIndicator = navIndicator
 
     -- Header: "Brand / Tab" breadcrumb, optional description on the right.
     local headerW = WINDOW_W - SIDEBAR_W - RAIL_W
@@ -2223,9 +2307,12 @@ function Library:CreateWindow(opts)
             Icon = menuSettings.Icon or {"settings", "settings-2", "sliders-horizontal"},
             Fallback = "S",
         })
-        local settingsPopup = createPopup(window, settingsButton, 190, 107, false)
-        local label = muted(settingsPopup.Object, "Menu scale", 10, 6, 170, 14, 11)
-        local holder = transparent(settingsPopup.Object, 10, 26, 170, 25)
+        -- Settings popup shares the colour picker grid: 12px margin, 24px controls.
+        local SP_W, SP_M = 220, 12
+        local SP_INNER = SP_W - SP_M * 2
+        local settingsPopup = createPopup(window, settingsButton, SP_W, 10, false)
+        local label = muted(settingsPopup.Object, "Scale", SP_M, SP_M, SP_INNER, 14, 11)
+        local holder = transparent(settingsPopup.Object, SP_M, SP_M + 20, SP_INNER, 24)
         local buttons = {}
 
         local function rebuildScaleButtons()
@@ -2233,20 +2320,23 @@ function Library:CreateWindow(opts)
             table.clear(buttons)
             local count = math.max(1, #Library.ScaleOptions)
             local gap = 6
-            local buttonWidth = math.floor((170 - gap * (count - 1)) / count)
+            local buttonWidth = math.floor((SP_INNER - gap * (count - 1)) / count)
             for index, option in ipairs(Library.ScaleOptions) do
                 local button = paint(rect(holder, (index - 1) * (buttonWidth + gap), 0,
-                    buttonWidth, 25, palette[4], 3, "TextButton"), 4)
-                local caption = text(button, tostring(option) .. "%", 0, 0, buttonWidth, 25,
+                    buttonWidth, 24, palette[4], Library.Design.ControlRadius, "TextButton"), 4)
+                local stroke = new("UIStroke", button, {Color = palette[5], Thickness = 1,
+                    ApplyStrokeMode = Enum.ApplyStrokeMode.Border})
+                local caption = text(button, tostring(option) .. "%", 0, 0, buttonWidth, 24,
                     10, palette[3], "center")
-                local hovered, tint = false, palette[3]
+                local hovered, glow, tint = false, 0, palette[3]
                 connect(button.MouseEnter, function() hovered = true end)
                 connect(button.MouseLeave, function() hovered = false end)
                 connect(button.Activated, function() window:SetScale(option) end)
                 step(function(_, k)
                     local active = state.Scale == option
-                    button.BackgroundColor3 = palette[4]:Lerp(palette[5], hovered and 1 or 0)
-                        :Lerp(accent, active and 0.42 * state.AccentAlpha or 0)
+                    glow = approach(glow, hovered and 1 or 0, k)
+                    button.BackgroundColor3 = palette[4]:Lerp(palette[5], glow)
+                    stroke.Color = palette[5]:Lerp(accent, active and state.AccentAlpha or 0)
                     tint = tint:Lerp(active and white or palette[3], k)
                     caption:Color(tint)
                 end, button)
@@ -2258,21 +2348,43 @@ function Library:CreateWindow(opts)
         window.RebuildScaleButtons = rebuildScaleButtons
         rebuildScaleButtons()
 
-        muted(settingsPopup.Object, "Theme", 10, 57, 170, 14, 11)
-        local swatchGap = 6
-        local swatchW = math.floor((170 - swatchGap * (#themes - 1)) / #themes)
-        for index, theme in ipairs(themes) do
-            local swatch = rect(settingsPopup.Object, 10 + (index - 1) * (swatchW + swatchGap), 77,
-                swatchW, 22, theme[2], 5, "TextButton")
-            local dot = rect(swatch, (swatchW - 8) / 2, 7, 8, 8, THEME_ACCENTS[index], 4)
-            local ring = new("UIStroke", swatch, {Color = THEME_ACCENTS[index], Thickness = 1, Transparency = 1})
-            connect(swatch.Activated, function() Library:SetTheme(index) end)
-            window:Tooltip(swatch, THEME_NAMES[index])
-            step(function()
-                ring.Transparency = state.Theme == index and 0.1 or 0.8
-                dot.BackgroundTransparency = state.Theme == index and 0 or 0.35
-            end, swatch)
+        -- Theme swatches: a grid of surface-coloured tiles with the theme accent as a dot.
+        local themeLabel = muted(settingsPopup.Object, "Theme", SP_M, SP_M + 58, SP_INNER, 14, 11)
+        local swatchHolder = transparent(settingsPopup.Object, SP_M, SP_M + 78, SP_INNER, 24)
+        local swatches = {}
+        local function rebuildThemeSwatches()
+            for _, swatch in ipairs(swatches) do swatch:Destroy() end
+            table.clear(swatches)
+            local gap, perRow = 6, 6
+            local swatchW = math.floor((SP_INNER - gap * (perRow - 1)) / perRow)
+            local rows = math.max(1, math.ceil(#themes / perRow))
+            swatchHolder.Size = UDim2.fromOffset(SP_INNER, rows * 24 + (rows - 1) * gap)
+            for index, theme in ipairs(themes) do
+                local column, row = (index - 1) % perRow, math.floor((index - 1) / perRow)
+                local swatch = rect(swatchHolder, column * (swatchW + gap), row * (24 + gap),
+                    swatchW, 24, theme[2], Library.Design.ControlRadius, "TextButton")
+                local dot = rect(swatch, (swatchW - 8) / 2, 8, 8, 8, THEME_ACCENTS[index], 4)
+                local ring = new("UIStroke", swatch, {Color = palette[5], Thickness = 1,
+                    ApplyStrokeMode = Enum.ApplyStrokeMode.Border})
+                connect(swatch.Activated, function() Library:SetTheme(index) end)
+                window:Tooltip(swatch, THEME_NAMES[index])
+                local activeGlow = 0
+                step(function(_, k)
+                    activeGlow = approach(activeGlow, state.Theme == index and 1 or 0, k)
+                    swatch.BackgroundColor3 = themes[index][2]
+                    dot.BackgroundColor3 = THEME_ACCENTS[index] or theme[7]
+                    ring.Color = palette[5]:Lerp(THEME_ACCENTS[index] or white, activeGlow)
+                    dot.BackgroundTransparency = 0.4 - 0.4 * activeGlow
+                end, swatch)
+                swatches[#swatches + 1] = swatch
+            end
+            themeLabel.Object.Visible = #themes > 0
+            settingsPopup.Height = SP_M + 78 + swatchHolder.Size.Y.Offset + SP_M
+            settingsPopup.CurrentHeight = settingsPopup.Height
+            settingsPopup.Object.Size = UDim2.fromOffset(SP_W, settingsPopup.Height)
         end
+        window.RebuildThemeSwatches = rebuildThemeSwatches
+        rebuildThemeSwatches()
         connect(settingsButton.Activated, function() settingsPopup:Toggle(settingsButton) end)
         window.MenuSettingsButton = settingsButton
         window.MenuSettingsPopup = settingsPopup
@@ -3839,11 +3951,8 @@ local function createMiniButton(window, config)
         mini.Target = mini.Position
     end
 
-    local flash = 0
-
     function mini:Press()
         if self.Destroyed or not self.Enabled or not Runtime.IsEnabled(button) then return end
-        flash = 1 / 9
         if config.OnPress then
             Runtime.InvokeOwned(Runtime.GetOwner(), config.OnPress, self)
             return
@@ -3917,7 +4026,7 @@ local function createMiniButton(window, config)
     connect(button.MouseEnter, function() hover = true end)
     connect(button.MouseLeave, function() hover = false end)
 
-    local alpha, tint = mini.Active and 1 or 0, palette[3]
+    local alpha, tint, miniHover = mini.Active and 1 or 0, palette[3], 0
     local corner = button:FindFirstChildOfClass("UICorner")
     local geometryWidth, geometryHeight, geometryCaption
     local savedX, savedY, shownPosition = nil, nil, mini.Target
@@ -3929,10 +4038,9 @@ local function createMiniButton(window, config)
         end
         button.Visible = mini.Enabled and true or false
         if not mini.Enabled then return end
-        flash = math.max(0, flash - dt)
         alpha = approach(alpha, mini.Active and 1 or 0, k)
-        local base = palette[2]:Lerp(palette[5], hover and 0.6 or 0)
-        if flash > 0 then base = palette[6] end
+        miniHover = approach(miniHover, hover and 1 or 0, k)
+        local base = palette[2]:Lerp(palette[5], miniHover * 0.6)
         button.BackgroundColor3 = base:Lerp(accent, alpha * 0.55 * state.AccentAlpha)
         button.BackgroundTransparency = mini.Transparency
         stroke.Transparency = 0.4 + 0.6 * mini.Transparency
@@ -5588,7 +5696,7 @@ function Tab:AddButton(opts)
         connect(caption.Object:GetPropertyChangedSignal("Text"), placeIcon)
     end
 
-    local flash, color, hover = 0, palette[4], false
+    local color, hover = palette[4], false
     local api = baseApi(self, card, nil)
     local loading = false
     local buttonOwner = Runtime.GetOwner()
@@ -5618,7 +5726,6 @@ function Tab:AddButton(opts)
     function api:GetEnabled() return enabled end
     function api:Press()
         if self.Destroyed or not enabled or loading then return false end
-        flash = 1 / 9
         if self.Tab and self.Tab.Window then self.Tab.Window.ButtonPressed:Fire(self.Tab.Name .. "." .. name) end
         if opts.Callback then
             if opts.AutoLoading then
@@ -5653,19 +5760,19 @@ function Tab:AddButton(opts)
         api:Press()
     end)
 
+    local hoverGlow, rowWash = 0, rowAction and not self.IsGroup
     step(function(dt, k)
-        flash = math.max(0, flash - dt)
-        local target = palette[4]
-        if flash > 0 then
-            target = palette[6]
-        elseif hover then
-            target = palette[5]
+        hoverGlow = approach(hoverGlow, hover and 1 or 0, k)
+        if rowWash then
+            -- Loose row buttons hover like toggles: a soft control-colour wash on the card.
+            control.BackgroundColor3 = palette[4]
+            control.BackgroundTransparency = 1 - hoverGlow * 0.6
+        elseif not rowAction then
+            color = palette[4]:Lerp(palette[5], hoverGlow)
+            control.BackgroundColor3 = color
         end
-        color = color:Lerp(target, math.min(1, 10 * dt))
-        control.BackgroundColor3 = color
         if rowAction and icon then
-            icon:Color(palette[3]:Lerp(white, hover and 0.8 or 0))
-            icon.Object.Position = UDim2.fromOffset(w - 26 + roundPixel(flash * 18), (controlH - 12) / 2)
+            icon:Color(palette[3]:Lerp(white, hoverGlow * 0.8))
         end
         caption:Alpha(enabled and not loading and 1 or 0.38)
         if icon then icon:Alpha(enabled and not loading and 1 or 0.38) end
@@ -5866,7 +5973,7 @@ function Tab:AddSegmented(opts)
         if not indicatorX or Library.FadeAnimations == false then
             indicatorX, indicatorVelocity = target, 0
         else
-            indicatorX, indicatorVelocity = spring(indicatorX, indicatorVelocity, target, 32, dt)
+            indicatorX, indicatorVelocity = spring(indicatorX, indicatorVelocity, target, Library.Motion.Spring, dt)
             if indicatorX ~= target and self.Window then self.Window.Animating = true end
         end
         indicator.Position = UDim2.fromOffset(roundPixel(indicatorX), 2)
@@ -7501,16 +7608,48 @@ function Tab:AddCardSelector(opts) return self:AddCardGrid(opts) end
 function Window:AddSearch() return nil end
 function Library:AddSearch() return nil end
 function Library:GetSearch() return nil end
--- Registers (or replaces) a theme. `colors` holds the seven palette slots as Color3 or {r, g, b}.
-function Library:AddTheme(name, colors, accentColor)
-    assert(type(name) == "string" and name ~= "", "WolfUi: AddTheme needs a name")
-    assert(type(colors) == "table", "WolfUi: AddTheme needs a table of 7 colours")
+local function toColor(value)
+    if typeof(value) == "Color3" then return value end
+    if type(value) == "table" then
+        return Color3.fromRGB(tonumber(value[1] or value.R) or 0, tonumber(value[2] or value.G) or 0,
+            tonumber(value[3] or value.B) or 0)
+    end
+    if type(value) == "string" then
+        local hex = string.match(value, "^#?(%x%x%x%x%x%x)$")
+        if hex then return Color3.fromRGB(tonumber(string.sub(hex, 1, 2), 16),
+            tonumber(string.sub(hex, 3, 4), 16), tonumber(string.sub(hex, 5, 6), 16)) end
+    end
+    return nil
+end
+
+-- Registers (or replaces) a theme and returns its index. Two call forms:
+--   Library:AddTheme({Name = "Dusk", Colors = {Window = ..., Surface = ..., Muted = ..., Control = ...,
+--       Stroke = ..., StrongStroke = ..., Text = ...}, Accent = Color3, Background = "rbxassetid://..."})
+--   Library:AddTheme("Dusk", {c1, c2, c3, c4, c5, c6, c7}, accent)
+-- Colours may be Color3, {r, g, b} or "#RRGGBB". Missing slots inherit from `Extends` (default Midnight).
+function Library:AddTheme(definition, colors, accentColor)
+    local name, background, extends
+    if type(definition) == "table" then
+        name = definition.Name
+        colors = definition.Colors or definition.Palette or definition
+        accentColor = definition.Accent
+        background = definition.Background
+        extends = definition.Extends or definition.Base
+    else
+        name = definition
+    end
+    assert(type(name) == "string" and name ~= "", "WolfUi: AddTheme needs a Name")
+    assert(type(colors) == "table", "WolfUi: AddTheme needs a Colors table")
+    local base = themes[resolveTheme(extends) or 1]
     local theme = {}
-    for slot = 1, 7 do
-        local value = colors[slot]
-        if type(value) == "table" then value = Color3.fromRGB(value[1] or 0, value[2] or 0, value[3] or 0) end
-        assert(typeof(value) == "Color3", "WolfUi: theme slot " .. slot .. " must be a Color3")
-        theme[slot] = value
+    for slot = 1, 7 do theme[slot] = base[slot] end
+    for key, value in pairs(colors) do
+        local slot = tonumber(key) or PALETTE_SLOTS[key]
+        if slot and slot >= 1 and slot <= 7 then
+            local color = toColor(value)
+            assert(color, "WolfUi: theme colour '" .. tostring(key) .. "' is not a colour")
+            theme[slot] = color
+        end
     end
     local index = resolveTheme(name)
     if not index then
@@ -7518,20 +7657,86 @@ function Library:AddTheme(name, colors, accentColor)
         THEME_NAMES[index] = name
     end
     themes[index] = theme
-    THEME_ACCENTS[index] = typeof(accentColor) == "Color3" and accentColor or THEME_ACCENTS[index] or theme[7]
+    THEME_ACCENTS[index] = toColor(accentColor) or THEME_ACCENTS[index] or theme[7]
+    if background ~= nil then THEME_BACKGROUNDS[index] = background ~= false and background or nil end
     local list = {}
     for i, entry in ipairs(themes) do list[i] = table.freeze(table.clone(entry)) end
     self.Themes = table.freeze(list)
-    if state.Theme == index then Runtime.ThemeDirty = true end
+    if state.Theme == index then
+        Runtime.ThemeDirty = true
+        if THEME_BACKGROUNDS[index] ~= nil then self:SetBackground(THEME_BACKGROUNDS[index]) end
+    end
+    local window = self.Window
+    if window and window.RebuildThemeSwatches then window.RebuildThemeSwatches() end
     return index
+end
+
+-- Builder form: Library:Theme("Dusk"):Colors{...}:Accent(c):Background(id):Register()
+function Library:Theme(name)
+    local builder = {Definition = {Name = tostring(name), Colors = {}}}
+    function builder:Colors(map) for k, v in pairs(map or {}) do self.Definition.Colors[k] = v end return self end
+    function builder:Color(slot, value) self.Definition.Colors[slot] = value return self end
+    function builder:Accent(value) self.Definition.Accent = value return self end
+    function builder:Background(value) self.Definition.Background = value return self end
+    function builder:Extends(value) self.Definition.Extends = value return self end
+    function builder:Register() return Library:AddTheme(self.Definition) end
+    builder.Add, builder.Apply = builder.Register, function(b) local i = b:Register() Library:SetTheme(i) return i end
+    return builder
+end
+
+function Library:RemoveTheme(value)
+    local index = resolveTheme(value)
+    if not index or index == 1 or #themes <= 1 then return false end
+    table.remove(themes, index)
+    table.remove(THEME_NAMES, index)
+    table.remove(THEME_ACCENTS, index)
+    table.remove(THEME_BACKGROUNDS, index)
+    if state.Theme == index then self:SetTheme(1) elseif state.Theme > index then state.Theme = state.Theme - 1 end
+    local list = {}
+    for i, entry in ipairs(themes) do list[i] = table.freeze(table.clone(entry)) end
+    self.Themes = table.freeze(list)
+    local window = self.Window
+    if window and window.RebuildThemeSwatches then window.RebuildThemeSwatches() end
+    return true
+end
+
+function Library:GetThemeInfo(value)
+    local index = resolveTheme(value) or state.Theme
+    local theme = themes[index]
+    if not theme then return nil end
+    return {Name = THEME_NAMES[index], Index = index, Colors = table.clone(theme),
+        Accent = THEME_ACCENTS[index], Background = THEME_BACKGROUNDS[index]}
 end
 function Library:SetTheme(value, keepAccent)
     local index = resolveTheme(value) or state.Theme or 1
     state.Theme, self.Theme = index, index
     if keepAccent ~= true and THEME_ACCENTS[index] then self:SetAccent(THEME_ACCENTS[index]) end
+    -- Themes carry their own backdrop; an explicit SetBackground afterwards still wins.
+    if not state.BackgroundPinned then self:SetBackground(THEME_BACKGROUNDS[index], true) end
     Runtime.ThemeDirty = true
+    fireChange("Theme", THEME_NAMES[index])
     if self.Window and self.Window.Wake then self.Window:Wake(1) end
     return THEME_NAMES[index], index
+end
+
+-- Window backdrop. Accepts nil (flat), an asset id string, or a table:
+--   {Image = "rbxassetid://…", Transparency = 0.6, Tint = Color3, ScaleType = "Crop"|"Fit"|"Tile",
+--    TileSize = 256, Gradient = true|false|Color3}
+-- `Gradient` layers a soft accent-tinted wash on top of the window colour (on by default).
+function Library:SetBackground(spec, fromTheme)
+    if type(spec) == "string" then spec = {Image = spec} end
+    if spec ~= nil and type(spec) ~= "table" then spec = nil end
+    state.Background = spec
+    state.BackgroundPinned = not fromTheme and spec ~= nil
+    self.Background = spec
+    local window = self.Window
+    if window and window.ApplyBackground then window.ApplyBackground(spec) end
+    return spec
+end
+function Library:GetBackground() return state.Background end
+function Library:ClearBackground()
+    state.BackgroundPinned = false
+    return self:SetBackground(THEME_BACKGROUNDS[state.Theme], true)
 end
 function Library:GetTheme() return THEME_NAMES[state.Theme] or THEME_NAMES[1], state.Theme end
 function Library:GetThemes() return table.clone(THEME_NAMES) end
@@ -7548,6 +7753,39 @@ end
 function Library:GetPaletteColor(slot)
     return palette[math.floor(tonumber(slot) or 0)]
 end
+
+-- Registers a custom element so `Tab:Add<Name>(opts)` and `{Type = "<name>"}` in
+-- AddElements both work. The builder receives (tab, opts) and should create its
+-- surface with `tab:_card(w, h, name)` and return an API table (see Library.Helpers).
+function Library:RegisterElement(name, builder, aliases)
+    assert(type(name) == "string" and name ~= "", "WolfUi: RegisterElement needs a name")
+    assert(type(builder) == "function", "WolfUi: RegisterElement needs a builder function")
+    local method = "Add" .. name
+    Tab[method] = function(tab, opts)
+        opts = named(opts)
+        local api = builder(tab, opts)
+        if type(api) == "table" and api.Object and not api.Tab then api.Tab = tab end
+        return api
+    end
+    local key = string.gsub(string.lower(name), "[%s_%-]", "")
+    elementMethods[key] = method
+    for _, alias in ipairs(aliases or {}) do
+        elementMethods[string.gsub(string.lower(tostring(alias)), "[%s_%-]", "")] = method
+    end
+    return method
+end
+
+-- Primitives exposed for custom elements: all take pixel offsets and return the instance
+-- (or a small label API for text/muted/icon). Colours passed as palette slots stay themed.
+Library.Helpers = table.freeze({
+    rect = rect, transparent = transparent, text = text, muted = muted, icon = iconLabel,
+    paint = paint, new = new, step = step, approach = approach, spring = spring,
+    roundPixel = roundPixel, connect = connect, baseApi = baseApi, bindTitle = bindTitle,
+    palette = function(slot) return palette[slot] end,
+    accent = function() return accent, state.AccentAlpha end,
+    white = function() return white end,
+    fireChange = fireChange,
+})
 
 function Tab:AddElements(items)
     assert(type(items) == "table", "WolfUi: AddElements expects a table")
@@ -7965,7 +8203,7 @@ function Library:Notify(opts)
     local bounds = TextService:GetTextSize(body, 11 + FONT_SIZE_BIAS, UI_FONT, Vector2.new(width - 58, 10000))
     local maximumBody = math.max(14, math.min(160, window.Viewport.Y - 90))
     local height = (title ~= "" and 26 or 10) + math.min(maximumBody, math.max(14, bounds.Y)) + 10
-    local object = rect(window.NotifyHolder, width + 10, 0, width, height, palette[2], 6, "TextButton")
+    local object = rect(window.NotifyHolder, width + 10, 0, width, height, palette[2], Library.Design.PopupRadius, "TextButton")
     object.Name = "Notification"
     object.BackgroundTransparency = 0
     object.ClipsDescendants = true
@@ -8318,7 +8556,7 @@ function Library:Dialog(opts)
     shade.Size, shade.BackgroundTransparency, shade.ZIndex, shade.Active = UDim2.fromScale(1, 1), 1, 90, true
     maid:Add(shade)
     api.Object = shade
-    local card = rect(shade, 0, 0, width, height, palette[2], 6, "CanvasGroup")
+    local card = rect(shade, 0, 0, width, height, palette[2], Library.Design.PopupRadius, "CanvasGroup")
     card.AnchorPoint, card.Position, card.ZIndex = Vector2.new(0.5, 0.5), UDim2.fromScale(0.5, 0.5), 91
     card.GroupTransparency, card.BackgroundTransparency, card.ClipsDescendants = 1, 0, true
     new("UIStroke", card, {Color = palette[5], Thickness = 1, Transparency = 0})
